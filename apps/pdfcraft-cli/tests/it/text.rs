@@ -280,3 +280,153 @@ mod page_argument_tests {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ai_summary_previews_then_sends_only_confirmed_pages() {
+    ai_summary_mock(false);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ai_summary_supports_responses_endpoint_and_output() {
+    ai_summary_mock(true);
+}
+
+#[cfg(target_os = "macos")]
+fn ai_summary_mock(responses: bool) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir().unwrap();
+    let settings = root.path().join("Library/Application Support/PdfCraft");
+    std::fs::create_dir_all(&settings).unwrap();
+    let pdf = root.path().join("fixture.pdf");
+    std::fs::write(&pdf, fixture(3)).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let route = if responses { "/v1/responses" } else { "/v1/chat/completions" };
+    let endpoint = format!("http://{}{route}", listener.local_addr().unwrap());
+    let preferences = settings.join("ai-providers.json");
+    let mut profile = json!({ "name": "Mock", "base_url": base_url, "model": "mock-model" });
+    if responses {
+        profile["api_format"] = json!("responses");
+        profile["base_url"] = json!(endpoint);
+    }
+    let save = |active: Value| {
+        std::fs::write(&preferences, json!({"active":active, "profiles":[profile]}).to_string()).unwrap();
+    };
+    let run = |args: Value, mark: bool| {
+        let script = root.path().join("summary.json");
+        let mut steps = vec![json!({"tool":"doc_open","args":{"path":pdf}})];
+        if mark {
+            steps.push(json!({"tool":"redact_mark","args":{"doc":1,"page":2,"whole_pages":true}}));
+        }
+        steps.push(json!({"tool":"ai_summarize","args":args}));
+        let steps = json!(steps);
+        std::fs::write(&script, steps.to_string()).unwrap();
+        let output = Command::new(BIN)
+            .env("HOME", root.path())
+            .args(["run", "--report", "--script"])
+            .arg(&script)
+            .arg("--root")
+            .arg(root.path())
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
+        (output.status.success(), report)
+    };
+    let args = json!({"doc":1,"first_page":2,"last_page":2});
+    save(Value::Null);
+    let (ok, disabled) = run(args.clone(), false);
+    assert!(!ok);
+    assert!(disabled["steps"][1]["error"].as_str().unwrap().contains("Select an active provider"), "{disabled}");
+    save(json!("Mock"));
+    let (ok, preview) = run(args.clone(), false);
+    assert!(ok, "{preview}");
+    let preview = &preview["steps"][1]["result"][0];
+    assert_eq!(preview["sent"], false);
+    assert_eq!(preview["endpoint"], endpoint);
+
+    let mut confirm = args;
+    confirm["user_confirmed"] = json!(true);
+    confirm["confirmed_endpoint"] = json!("http://127.0.0.1/other");
+    confirm["confirmed_model"] = json!("mock-model");
+    let (ok, mismatch) = run(confirm.clone(), false);
+    assert!(!ok);
+    assert!(mismatch["steps"][1]["error"].as_str().unwrap().contains("must match the preview"), "{mismatch}");
+    confirm["confirmed_endpoint"] = json!(endpoint);
+    let (ok, marked) = run(confirm.clone(), true);
+    assert!(!ok);
+    assert!(marked["steps"][2]["error"].as_str().unwrap().contains("unapplied redactions"), "{marked}");
+
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    listener.set_nonblocking(false).unwrap();
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            // Keep the mock bounded even if a regression prevents the request.
+            listener.set_nonblocking(true).unwrap();
+            let start = std::time::Instant::now();
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && start.elapsed() < Duration::from_secs(5) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("mock provider received no request: {e}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut read = BufReader::new(&mut socket);
+            let mut line = String::new();
+            read.read_line(&mut line).unwrap();
+            assert_eq!(line, format!("POST {route} HTTP/1.1\r\n"));
+            let mut length = None;
+            loop {
+                line.clear();
+                assert_ne!(read.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    assert!(!name.eq_ignore_ascii_case("Authorization"), "keyless local profile");
+                    if name.eq_ignore_ascii_case("Content-Length") {
+                        length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+            }
+            let mut body = vec![0; length.unwrap()];
+            read.read_exact(&mut body).unwrap();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["model"], "mock-model");
+            let reply = if responses {
+                assert_eq!(payload["input"], "[Page 2]\nPage 2\n\n");
+                assert_eq!(payload["store"], false);
+                assert!(payload["instructions"].as_str().unwrap().contains("Summarize"));
+                assert!(payload.get("messages").is_none());
+                r#"{"status":"completed","output":[{"type":"reasoning"},{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Intermediate text"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"A summary of page two."}]}]}"#
+            } else {
+                assert_eq!(payload["messages"][1]["content"], "[Page 2]\nPage 2\n\n");
+                r#"{"choices":[{"message":{"content":"A summary of page two."},"finish_reason":"stop"}]}"#
+            };
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        });
+        let (ok, result) = run(confirm, false);
+        server.join().unwrap();
+        assert!(ok, "{result}");
+        assert_eq!(result["steps"][1]["result"][0]["sent"], true);
+        assert_eq!(result["steps"][1]["result"][0]["summary"], "A summary of page two.");
+    });
+}

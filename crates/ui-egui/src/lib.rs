@@ -87,6 +87,8 @@ pub use recovery::{AUTOSAVE_SECS, RecoveryMeta, RecoveryStore, default_dictionar
 use theme::{ThemeKind, ThemePreference};
 pub use workflows::ocr_verify::{OcrVerify, Phase};
 
+#[cfg(target_os = "macos")]
+mod ai_ui;
 mod app;
 mod frame_guard;
 mod hooks;
@@ -795,6 +797,10 @@ pub struct PdfCraftApp {
     /// Number pages dialog settings (1-based pages).
     pub number_draft: NumberDraft,
     pub(crate) word_count_draft: word_count_ui::Draft,
+    #[cfg(target_os = "macos")]
+    ai_settings: ai_ui::Settings,
+    #[cfg(target_os = "macos")]
+    ai_summary: Option<ai_ui::Summary>,
     pub printer_marks_draft: printer_marks_ui::PrinterMarksDraft,
     pub convert_colours_draft: convert_colours_ui::ConvertColoursDraft,
     pub hairlines_draft: hairlines_ui::HairlinesDraft,

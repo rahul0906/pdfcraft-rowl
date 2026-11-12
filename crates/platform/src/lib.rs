@@ -4,6 +4,8 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(target_os = "macos")]
+pub mod ai;
 pub mod desktop_theme;
 pub mod owner_only;
 pub mod staging;

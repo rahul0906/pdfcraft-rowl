@@ -113,6 +113,15 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
     remote_link_prompt(app, ctx);
     full_screen_prompt(app, ctx);
     crate::updates::dialog(app, ctx);
+    #[cfg(target_os = "macos")]
+    {
+        if app.dialog != Some(Dialog::Preferences) {
+            app.ai_settings.reset();
+        }
+        if app.dialog != Some(Dialog::AiSummary) {
+            app.ai_summary = None;
+        }
+    }
     if app.dialog != Some(Dialog::WordCount) {
         app.word_count_draft.cancel();
     }
@@ -432,6 +441,11 @@ fn dialog_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, dialog: Dialog, req: &m
         Dialog::DocumentJs => {
             ui.set_width(640.0);
             req.close = crate::js_ui::document_js_body(ui, app, &t);
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        Dialog::AiSummary => {
+            req.close = crate::ai_ui::summary_body(ui, app);
             return false;
         }
         Dialog::Preferences => {

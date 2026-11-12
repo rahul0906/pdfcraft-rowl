@@ -358,6 +358,10 @@ impl PdfCraftApp {
             replace_draft: None,
             number_draft: NumberDraft { from: 1, to: 1, style: pdfcraft_engine::LabelStyle::Decimal, prefix: String::new(), start: 1 },
             word_count_draft: word_count_ui::Draft::default(),
+            #[cfg(target_os = "macos")]
+            ai_settings: Default::default(),
+            #[cfg(target_os = "macos")]
+            ai_summary: None,
             printer_marks_draft: Default::default(),
             convert_colours_draft: Default::default(),
             hairlines_draft: Default::default(),

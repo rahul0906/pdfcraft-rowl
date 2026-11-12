@@ -236,6 +236,8 @@ impl PdfCraftApp {
                 }
             }
             "app.preferences" => self.dialog = Some(Dialog::Preferences),
+            #[cfg(target_os = "macos")]
+            "ai.summary" => crate::ai_ui::open(self),
             "protect.remove_hidden" => self.open_remove_hidden(),
             "print.dialog" => self.open_print(),
             "optimize.advanced" => self.dialog = Some(Dialog::Optimize),

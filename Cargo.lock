@@ -4369,6 +4369,7 @@ dependencies = [
  "png 0.18.1",
  "rustix 1.1.6",
  "serde_json",
+ "tempfile",
  "winresource",
 ]
 
@@ -4636,9 +4637,16 @@ version = "0.21.1"
 dependencies = [
  "async-channel",
  "futures-lite",
+ "getrandom 0.4.3",
  "log",
  "rustix 1.1.6",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "ureq",
+ "url",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]

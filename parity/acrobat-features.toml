@@ -9831,11 +9831,11 @@ title = "AI provider interface (local model or own endpoint), off by default"
 area = "N"
 tier = "P2"
 milestone = "M13"
-status = "planned"
+status = "partial"
 commands = []
-tools = []
-evidence = []
-notes = ""
+tools = ["ai_summarize"]
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_summary_previews_then_sends_only_confirmed_pages"]
+notes = "Local macOS implementation for OpenAI-compatible connections, with Keychain credentials."
 
 [[feature]]
 id = "misc.ai-summary"
@@ -9843,11 +9843,11 @@ title = "Summarize a document"
 area = "N"
 tier = "P2"
 milestone = "M13"
-status = "planned"
-commands = []
-tools = []
-evidence = []
-notes = ""
+status = "partial"
+commands = ["ai.summary"]
+tools = ["ai_summarize"]
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_summary_previews_then_sends_only_confirmed_pages"]
+notes = "Local macOS implementation, selected page range and extracted text only."
 
 [[feature]]
 id = "misc.ai-ask"

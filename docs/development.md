@@ -28,6 +28,24 @@ the low-disk artifacts, run `cargo clean --profile low-disk`.
 Building PdfCraft requires Rust 1.95 or later: the UI crate and its `egui` and `craft-ui`
 dependencies need it, and the workspace `rust-version` states the same minimum.
 
+## Local AI summaries on macOS
+
+Open **Preferences → AI Providers**, add a profile with a base URL and model ID, then select
+**Use provider**. The OpenAI preset uses `https://api.openai.com/v1`. Choose **Chat Completions**
+or **Responses** according to the provider's documentation. For Meta's `muse-ember-1.0`, use
+`https://api.meta.ai/v1` and **Responses**. For a server running on your Mac, you can use a loopback URL
+such as `http://127.0.0.1:1234/v1` and leave the API key empty if the server supports that.
+When supplied, the key is saved in macOS Keychain. **Test connection** uses sample text.
+
+Open a PDF and choose **AI assistant → Summarize**. Review the destination and page range,
+then choose **Send and summarize**. The range is limited to 50 pages and 64 KiB of extracted
+text. Scanned pages need an existing OCR text layer. The result stays in the summary dialog
+until you copy it or close the dialog.
+
+CLI and MCP callers can use `ai_summarize` with `doc`, `first_page`, and `last_page`.
+The first call previews the endpoint and model. After the user confirms, repeat the call
+with `user_confirmed: true`, `confirmed_endpoint`, and `confirmed_model` from the preview.
+
 ## Annotation tool pin
 
 The annotation quick bar's **Keep tool selected** pin is a shared preference, stored as the

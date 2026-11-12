@@ -71,6 +71,8 @@ impl Automation {
             "page_render" => return self.page_render(&a),
             "model_render" => return self.model_render(&a),
             "comment_image_preview" => return self.comment_image_preview(&a),
+            #[cfg(target_os = "macos")]
+            "ai_summarize" => self.ai_summarize(&a)?,
             "text_extract" => self.text_extract(&a)?,
             "text_word_count" => self.text_word_count(&a)?,
             "text_find" => self.text_find(&a)?,

@@ -537,7 +537,15 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
     });
     ui.add_space(12.0);
 
-    // Card 6: JavaScript
+    #[cfg(target_os = "macos")]
+    {
+        preference_card(ui, t, tl!("AI Providers"), Some("sparkles"), &mut ctx, |ui, _| {
+            app.ai_settings.draw(ui);
+        });
+        ui.add_space(12.0);
+    }
+
+    // JavaScript
     let title6 = "JavaScript";
     preference_card(ui, t, title6, Some("code-xml"), &mut ctx, |ui, ctx| {
         card_javascript(ui, app, t, ctx);
