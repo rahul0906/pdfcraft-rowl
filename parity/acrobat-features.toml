@@ -9855,11 +9855,11 @@ title = "Ask questions with citations to pages"
 area = "N"
 tier = "P2"
 milestone = "M13"
-status = "planned"
-commands = []
-tools = []
-evidence = []
-notes = ""
+status = "partial"
+commands = ["ai.ask"]
+tools = ["ai_ask"]
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_ask_retrieves_follow_up_context_and_validates_citations"]
+notes = "macOS document chat with local keyword retrieval, follow-up turns, local transcripts and page citations."
 
 [[feature]]
 id = "misc.ai-conversational-edit"

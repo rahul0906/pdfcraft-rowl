@@ -163,7 +163,8 @@ fn check(h: &Harness<'static, PdfCraftApp>, name: &str) -> Result<(), String> {
     }
 }
 
-/// Every panel, in the order of the rail.
+/// Panels with deterministic fixtures, in rail order. AI chat has its own test with
+/// an injected conversation because its empty pane displays the local provider settings.
 const ALL: [RightPanel; 11] = [
     RightPanel::Comments,
     RightPanel::Bookmarks,
@@ -190,6 +191,8 @@ fn open(p: RightPanel) -> (Harness<'static, PdfCraftApp>, &'static str) {
         RightPanel::Attachments => "attachments",
         RightPanel::Signatures => "signatures",
         RightPanel::Tags => "tags",
+        #[cfg(target_os = "macos")]
+        RightPanel::AiChat => "ai-chat",
         RightPanel::Accessibility => {
             let mut h = harness("none");
             assert!(h.state_mut().execute("a11y.check"));

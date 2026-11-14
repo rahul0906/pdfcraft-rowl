@@ -263,7 +263,7 @@ pub fn summarize(profile: &Profile, text: &str) -> Result<String, String> {
     )
 }
 
-fn complete(profile: &Profile, instruction: &str, text: &str) -> Result<String, String> {
+pub(crate) fn complete(profile: &Profile, instruction: &str, text: &str) -> Result<String, String> {
     let url = profile.endpoint()?;
     let key = profile
         .account()

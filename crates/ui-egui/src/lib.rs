@@ -88,6 +88,8 @@ use theme::{ThemeKind, ThemePreference};
 pub use workflows::ocr_verify::{OcrVerify, Phase};
 
 #[cfg(target_os = "macos")]
+mod ai_chat_ui;
+#[cfg(target_os = "macos")]
 mod ai_ui;
 mod app;
 mod frame_guard;
@@ -799,6 +801,8 @@ pub struct PdfCraftApp {
     pub(crate) word_count_draft: word_count_ui::Draft,
     #[cfg(target_os = "macos")]
     ai_settings: ai_ui::Settings,
+    #[cfg(target_os = "macos")]
+    ai_chats: ai_chat_ui::Chats,
     #[cfg(target_os = "macos")]
     ai_summary: Option<ai_ui::Summary>,
     pub printer_marks_draft: printer_marks_ui::PrinterMarksDraft,

@@ -9,9 +9,9 @@ use zeroize::Zeroizing;
 
 use crate::{Dialog, PdfCraftApp, theme};
 
-type Job<T> = Receiver<Result<T, String>>;
+pub(crate) type Job<T> = Receiver<Result<T, String>>;
 
-fn start<T: Send + 'static>(ctx: &Context, work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<Job<T>, String> {
+pub(crate) fn start<T: Send + 'static>(ctx: &Context, work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<Job<T>, String> {
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
     std::thread::Builder::new()
@@ -25,7 +25,7 @@ fn start<T: Send + 'static>(ctx: &Context, work: impl FnOnce() -> Result<T, Stri
     Ok(rx)
 }
 
-fn poll<T>(job: &mut Option<Job<T>>) -> Option<Result<T, String>> {
+pub(crate) fn poll<T>(job: &mut Option<Job<T>>) -> Option<Result<T, String>> {
     let result = match job.as_ref()?.try_recv() {
         Ok(result) => result,
         Err(TryRecvError::Empty) => return None,

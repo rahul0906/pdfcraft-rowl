@@ -21,21 +21,37 @@ pub struct SummarySource {
 impl SummarySource {
     /// Capture the current working document and a 1-based inclusive page range.
     pub fn new(doc: &Document, first: usize, last: usize) -> Result<Self, String> {
+        Self::for_range(doc, first, last, MAX_PAGES)
+    }
+
+    pub(crate) fn for_range(doc: &Document, first: usize, last: usize, max_pages: usize) -> Result<Self, String> {
         doc.check_copying().map_err(|e| e.to_string())?;
         if first == 0 || last < first || last > doc.info.pages.len() {
             return Err("Select a page range within the document.".into());
         }
-        if last - first >= MAX_PAGES {
-            return Err(format!("Select at most {MAX_PAGES} pages at a time."));
+        if last - first >= max_pages {
+            return Err(format!("Select at most {max_pages} pages at a time."));
         }
         Ok(Self { bytes: doc.bytes.clone(), display: doc.display.clone(), config: doc.config.clone(), first, last })
     }
 
     pub fn extract(self) -> Result<String, String> {
+        let mut out = String::new();
+        self.visit_text(|page, text| {
+            if out.len().saturating_add(text.len()).saturating_add(32) > MAX_TEXT_BYTES {
+                return Err("This range has too much text. Select fewer pages.".into());
+            }
+            let _ = writeln!(out, "[Page {page}]\n{text}\n");
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    pub(crate) fn visit_text(self, mut visit: impl FnMut(usize, &str) -> Result<(), String>) -> Result<(), String> {
         crate::guard(|| {
             self.check_redactions()?;
             let mut renderer = PageRenderer::new(self.display, self.config);
-            let mut out = String::new();
+            let mut found = false;
             for page in self.first - 1..self.last {
                 let result = renderer.render(RenderRequest { page, kind: RequestKind::Text, scale: 1.0, ..Default::default() });
                 if result.error.is_some() {
@@ -47,19 +63,15 @@ impl SummarySource {
                 }
                 let text = text.plain_text();
                 let text = text.trim();
-                if text.is_empty() {
-                    continue;
+                if !text.is_empty() {
+                    found = true;
+                    visit(page + 1, text)?;
                 }
-                if out.len().saturating_add(text.len()).saturating_add(32) > MAX_TEXT_BYTES {
-                    return Err("This range has too much text. Select fewer pages.".into());
-                }
-                // A String formatter has no I/O and cannot fail.
-                let _ = writeln!(out, "[Page {}]\n{text}\n", page + 1);
             }
-            if out.is_empty() {
+            if !found {
                 return Err("The selected pages have no selectable text. Run Scan & OCR on scanned pages first.".into());
             }
-            Ok(out)
+            Ok(())
         })?
     }
 
@@ -84,7 +96,7 @@ impl SummarySource {
                 let annotation = doc.resolve(annotation);
                 let subtype = annotation.as_dict().and_then(|a| a.get(b"Subtype")).map(|s| doc.resolve(s));
                 if subtype.as_deref().and_then(Object::as_name) == Some(b"Redact") {
-                    return Err("The selected pages have unapplied redactions. Apply them before summarizing those pages.".into());
+                    return Err("The selected pages have unapplied redactions. Apply them before using AI on those pages.".into());
                 }
             }
         }

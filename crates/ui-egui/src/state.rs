@@ -52,6 +52,8 @@ pub enum RightPanel {
     Search,
     /// Compare files: the differences.
     Compare,
+    #[cfg(target_os = "macos")]
+    AiChat,
 }
 
 /// Quick-action bar tools (the vertical floating strip).

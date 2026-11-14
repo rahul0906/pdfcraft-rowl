@@ -14,6 +14,8 @@
 
 pub mod actions;
 #[cfg(target_os = "macos")]
+pub mod ai_ask;
+#[cfg(target_os = "macos")]
 pub mod ai_summary;
 pub mod autotag;
 mod bookmarks;

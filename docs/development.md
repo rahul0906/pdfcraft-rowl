@@ -46,6 +46,26 @@ CLI and MCP callers can use `ai_summarize` with `doc`, `first_page`, and `last_p
 The first call previews the endpoint and model. After the user confirms, repeat the call
 with `user_confirmed: true`, `confirmed_endpoint`, and `confirmed_model` from the preview.
 
+## Ask about this document on macOS
+
+Open **AI Assistant → Ask about this document** to chat beside the PDF. Choose a page range,
+review the provider shown in the pane, and click **Ask**. PdfCraft searches the selected
+pages locally and sends ranked excerpts, the question, and up to four recent turns from
+the same range. Click a source page to navigate there, or hover to read the excerpt.
+Keyword retrieval needs matches in the document text, so rephrase a question with words
+used by the document if no sources are found. The index covers up to 1,000 pages and
+4 MiB of extracted text per range.
+
+**Save chats on this Mac** is off until enabled for a named document. It saves up to
+24 turns per revision in the private `AI Chats` directory under PdfCraft’s application
+support folder. **New chat** clears the current conversation. Older saved revisions can
+be viewed and deleted from the conversation picker. Requests use the current PDF
+revision and its matching chat. **Stop** cancels local work before sending where possible
+and discards the result of a request already sent.
+
+CLI and MCP expose `ai_ask` with the same preview and destination confirmation as
+`ai_summarize`. For a follow-up, pass `previous_question` and optionally `previous_answer`.
+
 ## Annotation tool pin
 
 The annotation quick bar's **Keep tool selected** pin is a shared preference, stored as the

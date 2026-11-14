@@ -542,6 +542,9 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
                 item("Summarize", "sparkles", "ai.summary", Ready),
                 #[cfg(not(target_os = "macos"))]
                 item("Summarize", "sparkles", "ai.summary", Provider),
+                #[cfg(target_os = "macos")]
+                item("Ask about this document", "message-circle-reply", "ai.ask", Ready),
+                #[cfg(not(target_os = "macos"))]
                 item("Ask about this document", "message-circle-reply", "ai.ask", Provider),
                 item("Translate", "languages", "ai.translate", Provider),
             ],

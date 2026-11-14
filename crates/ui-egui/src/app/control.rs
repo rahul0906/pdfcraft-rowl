@@ -72,6 +72,8 @@ impl PdfCraftApp {
                     "tags" => Some(RightPanel::Tags),
                     "search" => Some(RightPanel::Search),
                     "compare" => Some(RightPanel::Compare),
+                    #[cfg(target_os = "macos")]
+                    "ai-chat" => Some(RightPanel::AiChat),
                     "none" => None,
                     other => return Err(format!("unknown panel {other}")),
                 }

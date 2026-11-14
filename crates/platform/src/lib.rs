@@ -6,6 +6,8 @@
 
 #[cfg(target_os = "macos")]
 pub mod ai;
+#[cfg(target_os = "macos")]
+pub mod ai_chat;
 pub mod desktop_theme;
 pub mod owner_only;
 pub mod staging;

@@ -361,6 +361,8 @@ impl PdfCraftApp {
             #[cfg(target_os = "macos")]
             ai_settings: Default::default(),
             #[cfg(target_os = "macos")]
+            ai_chats: Default::default(),
+            #[cfg(target_os = "macos")]
             ai_summary: None,
             printer_marks_draft: Default::default(),
             convert_colours_draft: Default::default(),
@@ -591,6 +593,8 @@ impl eframe::App for PdfCraftApp {
 
 impl PdfCraftApp {
     fn logic_unguarded(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        ai_chat_ui::refresh(&mut self.ai_chats, &self.session);
         #[cfg(test)]
         self.injected_panic(crate::frame_guard::FramePart::Logic);
         self.ctx = Some(ctx.clone());

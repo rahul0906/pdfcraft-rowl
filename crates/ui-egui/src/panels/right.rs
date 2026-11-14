@@ -59,6 +59,8 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     RightPanel::Accessibility => ("Accessibility Checker", None),
                     RightPanel::Tags => ("Tags", None),
                     RightPanel::Search => ("Search", None),
+                    #[cfg(target_os = "macos")]
+                    RightPanel::AiChat => ("Ask about this document", None),
                     RightPanel::Compare => ("Compare", compare.as_ref().filter(|c| c.new == id).map(|c| c.result.changes.len())),
                 };
                 // Comments count like Acrobat (no replies); the replies go in small text below.
@@ -189,6 +191,11 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     let enabled = !modal && view.panel_drag.is_none();
                     thumbnail_size(ui, &t, view, enabled);
                 }
+                #[cfg(target_os = "macos")]
+                if panel == RightPanel::AiChat {
+                    crate::ai_chat_ui::panel(ui, doc, &mut app.ai_chats, &mut nav);
+                    return;
+                }
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match panel {
                     RightPanel::Comments => {
                         if let Some(e) = crate::comments_panel::show(ui, &t, doc, view, prefs, comment_allowed, &mut nav) {
@@ -305,6 +312,8 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         panel_edit = edit;
                     }
                     RightPanel::Search => crate::search_ui::panel(ui, &t, view, info.pages.len()),
+                    #[cfg(target_os = "macos")]
+                    RightPanel::AiChat => {}
                     RightPanel::Compare => compare_action = crate::compare_ui::panel(ui, &t, compare, id),
                     RightPanel::Attachments => {
                         let attachable = doc.allows_modification() && doc.read_only_reason.is_none();

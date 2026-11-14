@@ -284,17 +284,23 @@ mod page_argument_tests {
 #[cfg(target_os = "macos")]
 #[test]
 fn ai_summary_previews_then_sends_only_confirmed_pages() {
-    ai_summary_mock(false);
+    ai_provider_mock(false, false);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn ai_summary_supports_responses_endpoint_and_output() {
-    ai_summary_mock(true);
+    ai_provider_mock(true, false);
 }
 
 #[cfg(target_os = "macos")]
-fn ai_summary_mock(responses: bool) {
+#[test]
+fn ai_ask_retrieves_follow_up_context_and_validates_citations() {
+    ai_provider_mock(true, true);
+}
+
+#[cfg(target_os = "macos")]
+fn ai_provider_mock(responses: bool, ask: bool) {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;
@@ -305,7 +311,9 @@ fn ai_summary_mock(responses: bool) {
     let settings = root.path().join("Library/Application Support/PdfCraft");
     std::fs::create_dir_all(&settings).unwrap();
     let pdf = root.path().join("fixture.pdf");
-    std::fs::write(&pdf, fixture(3)).unwrap();
+    let text = String::from_utf8(fixture(3)).unwrap();
+    let text = if ask { text.replace("Page 1", "Budget").replace("Page 2", "Refund").replace("Page 3", "Travel") } else { text };
+    std::fs::write(&pdf, text).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -326,7 +334,7 @@ fn ai_summary_mock(responses: bool) {
         if mark {
             steps.push(json!({"tool":"redact_mark","args":{"doc":1,"page":2,"whole_pages":true}}));
         }
-        steps.push(json!({"tool":"ai_summarize","args":args}));
+        steps.push(json!({"tool":if ask { "ai_ask" } else { "ai_summarize" },"args":args}));
         let steps = json!(steps);
         std::fs::write(&script, steps.to_string()).unwrap();
         let output = Command::new(BIN)
@@ -340,7 +348,11 @@ fn ai_summary_mock(responses: bool) {
         let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
         (output.status.success(), report)
     };
-    let args = json!({"doc":1,"first_page":2,"last_page":2});
+    let args = if ask {
+        json!({"doc":1, "question":"Are there exceptions?", "previous_question":"What is the refund policy?", "previous_answer":"The policy mentions refunds."})
+    } else {
+        json!({"doc":1,"first_page":2,"last_page":2})
+    };
     save(Value::Null);
     let (ok, disabled) = run(args.clone(), false);
     assert!(!ok);
@@ -363,6 +375,16 @@ fn ai_summary_mock(responses: bool) {
     let (ok, marked) = run(confirm.clone(), true);
     assert!(!ok);
     assert!(marked["steps"][2]["error"].as_str().unwrap().contains("unapplied redactions"), "{marked}");
+
+    if ask {
+        let mut unmatched = confirm.clone();
+        unmatched["question"] = json!("Zebras?");
+        unmatched.as_object_mut().unwrap().remove("previous_question");
+        unmatched.as_object_mut().unwrap().remove("previous_answer");
+        let (ok, no_match) = run(unmatched, false);
+        assert!(ok, "{no_match}");
+        assert_eq!(no_match["steps"][1]["result"][0]["sent"], false);
+    }
 
     listener.set_nonblocking(true).unwrap();
     assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
@@ -406,7 +428,13 @@ fn ai_summary_mock(responses: bool) {
             read.read_exact(&mut body).unwrap();
             let payload: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(payload["model"], "mock-model");
-            let reply = if responses {
+            let reply = if ask {
+                let input: Value = serde_json::from_str(payload["input"].as_str().unwrap()).unwrap();
+                assert_eq!(input["question"], "Are there exceptions?");
+                assert_eq!(input["recent_turns"][0]["question"], "What is the refund policy?");
+                assert_eq!(input["sources"], json!([{"source":1,"page":2,"text":"Refund"}]));
+                r#"{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The refund passage applies [S1]. [S99]"}]}]}"#
+            } else if responses {
                 assert_eq!(payload["input"], "[Page 2]\nPage 2\n\n");
                 assert_eq!(payload["store"], false);
                 assert!(payload["instructions"].as_str().unwrap().contains("Summarize"));
@@ -427,6 +455,12 @@ fn ai_summary_mock(responses: bool) {
         server.join().unwrap();
         assert!(ok, "{result}");
         assert_eq!(result["steps"][1]["result"][0]["sent"], true);
-        assert_eq!(result["steps"][1]["result"][0]["summary"], "A summary of page two.");
+        let result = &result["steps"][1]["result"][0];
+        if ask {
+            assert_eq!(result["answer"].as_str().unwrap().trim(), "The refund passage applies [Page 2].");
+            assert_eq!(result["citations"], json!([{"page":2,"excerpt":"Refund"}]));
+        } else {
+            assert_eq!(result["summary"], "A summary of page two.");
+        }
     });
 }
