@@ -56,19 +56,21 @@ Open a PDF and choose **AI Assistant → Ask about this document**, **Summarize*
 **Translate**. All three open the same sidebar. Review the provider and page range in the
 composer at the bottom. Results appear above it, with a **Copy** button for each answer.
 
-- **Ask** searches the selected pages locally. Open **Choose PDFs…** to include up to six open
-  PDFs and set each page range. Requests send your question, matching excerpts, and up to four
+- **Ask** searches the selected pages locally. Open the scope menu to set a page range for
+  **This PDF** or choose **Multiple PDFs…** to include up to six open PDFs. Hover over
+  the compact source list to see the full filenames and page ranges. Requests send your
+  question, matching excerpts, and up to four
   recent Ask turns from the same scope. A citation opens its PDF and highlights the passage.
   Retrieval covers up to 1,000 pages and 4 MiB of text in total.
 - Highlight text and click **Ask AI** to ask about just the selection. The selection can span up
-  to six pages and contain up to 7,200 bytes of extracted text. **Choose PDFs…** can broaden the
-  scope explicitly.
+  to six pages and contain up to 7,200 bytes of extracted text. Press **Escape** to clear a text
+  or snapshot selection and return to the current PDF. The question draft stays in the composer.
 - **Summarize** sends text from the selected pages, up to 50 pages and 64 KiB per request.
 - **Translate** starts with the current page when opening the conversation. Choose a
   target language from the dropdown, then select up to 10 pages or 12 KiB of text.
   The result is copyable text in the conversation.
-- For scans, enable **Recognize scanned text locally** in **Ask** or **Translate** and choose the
-  source language. PdfCraft uses the existing ocrs models for English. For the other source
+- For scans, open **OCR settings** in **Ask** or **Translate**, enable **Recognize scanned text
+  locally**, and choose the source language. PdfCraft uses the existing ocrs models for English. For the other source
   languages in the menu, choose **auto** or **tesseract** and install the matching Tesseract
   language pack. Ask recognizes up to 20 scanned pages per request. OCR leaves the PDF
   unchanged. Expand **Source text** after translating to review what OCR read, and click a

@@ -4544,10 +4544,13 @@ fn ai_ask_from_the_selection_bar_opens_with_selected_text_scope() {
     h.run_steps(4);
     h.get_by_role_and_label(Role::Button, "Ask AI").click();
     h.run_steps(5);
-    h.get_by_label("Selected text in text.pdf");
-    h.get_by_role_and_label(Role::Button, "Choose PDFs…");
+    h.get_by_role_and_label(Role::Button, "Text on page 1");
     h.get_by_role_and_label(Role::MultilineTextInput, "Question");
     assert!(h.query_by_label("From page").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::Button, "This PDF · all pages");
+    assert!(h.query_by_label("Ask AI").is_none());
 }
 
 /// `n` pages with one comment each, "Card 1" to "Card n".

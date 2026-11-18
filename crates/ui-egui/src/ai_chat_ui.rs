@@ -144,6 +144,14 @@ impl Chat {
         }
     }
 
+    fn pages(&self) -> (usize, usize) {
+        match self.task {
+            Task::Ask => self.ask_pages,
+            Task::Summarize => self.summary_pages,
+            Task::Translate => self.translation_pages,
+        }
+    }
+
     fn pages_mut(&mut self) -> &mut (usize, usize) {
         match self.task {
             Task::Ask => &mut self.ask_pages,
@@ -211,7 +219,7 @@ impl Chat {
         }
         let task = self.task;
         let region = (task == Task::Translate).then(|| self.figure_selection()).flatten();
-        let scope = region.map(|(page, _)| (page, page)).unwrap_or_else(|| *self.pages_mut());
+        let scope = region.map(|(page, _)| (page, page)).unwrap_or_else(|| self.pages());
         if region.is_some() && !self.selection.as_ref().is_some_and(|(_, stamp)| stamp.matches(doc)) {
             return Err("The selected area changed. Select it again.".into());
         }
@@ -406,6 +414,25 @@ pub(crate) fn open(app: &mut PdfCraftApp, task: Task) {
     app.choose_right_panel(Some(RightPanel::AiChat));
 }
 
+fn question_id(doc: DocId) -> egui::Id {
+    egui::Id::unique(("ai-question-draft", doc.0))
+}
+
+pub(crate) fn question_has_focus(ctx: &egui::Context, doc: DocId) -> bool {
+    ctx.memory(|memory| memory.has_focus(question_id(doc)))
+}
+
+pub(crate) fn has_selection(chats: &Chats, doc: DocId) -> bool {
+    chats.get(&doc).is_some_and(|chat| chat.selection.is_some())
+}
+
+pub(crate) fn clear_selection(chats: &mut Chats, doc: DocId) {
+    if let Some(chat) = chats.get_mut(&doc).filter(|chat| chat.selection.is_some()) {
+        chat.clear_selection();
+        chat.error = None;
+    }
+}
+
 pub(crate) fn open_selection(app: &mut PdfCraftApp, view: usize, selection: ai_ask::Selection) {
     open_scope(app, view, selection, Task::Ask, false);
 }
@@ -426,6 +453,7 @@ fn open_scope(app: &mut PdfCraftApp, view: usize, selection: ai_ask::Selection, 
         chat.vision = false;
         chat.destination = provider();
         chat.selection = Some((selection, ai_ask::stamp(doc)));
+        chat.ask_documents = None;
         chat.archive = None;
         chat.error = None;
     }
@@ -607,23 +635,105 @@ fn header(ui: &mut egui::Ui, chat: &mut Chat, t: &theme::Tokens) {
     ui.separator();
 }
 
-fn ask_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session) {
-    let choose = ui.button(tl!("Choose PDFs…"));
-    egui::Popup::menu(&choose).show(|ui| {
-        if ui.button(tl!("Use current PDF")).clicked() {
+fn page_span(first: usize, last: usize) -> String {
+    if first == last { first.to_string() } else { format!("{first}–{last}") }
+}
+
+fn scope_summary(chat: &Chat, doc: &Document) -> String {
+    if chat.task == Task::Ask
+        && let Some((selection, _)) = &chat.selection
+    {
+        let (first, last) = match selection {
+            ai_ask::Selection::Run { anchor, head, .. } => (anchor.0.min(head.0), anchor.0.max(head.0)),
+            ai_ask::Selection::Rect { page, .. } => (*page, *page),
+        };
+        let label = if chat.figure {
+            tl!("Area on page {pages}")
+        } else if first == last {
+            tl!("Text on page {pages}")
+        } else {
+            tl!("Text on pages {pages}")
+        };
+        return crate::i18n::fmt(label, &[("pages", &page_span(first, last))]);
+    }
+    if chat.task == Task::Translate
+        && let Some((page, _)) = chat.figure_selection()
+    {
+        return crate::i18n::fmt(tl!("Area on page {pages}"), &[("pages", &page.to_string())]);
+    }
+    if chat.task == Task::Ask
+        && let Some(documents) = &chat.ask_documents
+    {
+        let label = if documents.len() == 1 { tl!("{n} PDF") } else { tl!("{n} PDFs") };
+        return crate::i18n::fmt(label, &[("n", &documents.len().to_string())]);
+    }
+    let (first, last) = chat.pages();
+    if first == 1 && last == doc.info.pages.len() {
+        tl!("This PDF · all pages").into()
+    } else {
+        let label = if first == last { tl!("This PDF · page {pages}") } else { tl!("This PDF · pages {pages}") };
+        crate::i18n::fmt(label, &[("pages", &page_span(first, last))])
+    }
+}
+
+fn range_controls(ui: &mut egui::Ui, count: usize, (first, last): &mut (usize, usize)) -> bool {
+    let count = count.max(1);
+    ui.horizontal_wrapped(|ui| {
+        let label = ui.label(tl!("From page"));
+        let from = ui.add(egui::DragValue::new(first).range(1..=count)).labelled_by(label.id);
+        let label = ui.label(tl!("To page"));
+        let to = ui.add(egui::DragValue::new(last).range(1..=count)).labelled_by(label.id);
+        from.changed() || to.changed()
+    })
+    .inner
+}
+
+fn scope_menu(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session) {
+    if chat.task == Task::Ask {
+        let this_pdf = chat.selection.is_none() && chat.ask_documents.is_none();
+        if ui.selectable_label(this_pdf, tl!("This PDF")).clicked() {
             chat.clear_selection();
             chat.ask_documents = None;
-            ui.close();
+            chat.error = None;
         }
-        let mut chosen = chat.ask_documents.clone().unwrap_or_else(|| vec![(doc.id, chat.ask_pages)]);
-        let mut changed = false;
-        egui::ScrollArea::vertical().id_salt("ai-open-pdfs").max_height(230.0).show(ui, |ui| {
-            for open in session.docs() {
-                let previous = chosen.iter().position(|(id, _)| *id == open.id);
-                let mut checked = previous.is_some();
-                let enabled = open.allows_copying() && (checked || chosen.len() < ai_ask::MAX_DOCUMENTS);
-                let name = ai_ask::document_label(open, session);
-                if ui.add_enabled(enabled || checked, crate::widgets::checkbox(&mut checked, &name)).changed() {
+        if (session.docs().len() > 1 || chat.ask_documents.is_some())
+            && ui.selectable_label(chat.ask_documents.is_some(), tl!("Multiple PDFs…")).clicked()
+            && chat.ask_documents.is_none()
+        {
+            chat.clear_selection();
+            chat.ask_documents = Some(vec![(doc.id, chat.ask_pages)]);
+            chat.error = None;
+        }
+        if let Some(chosen) = &mut chat.ask_documents {
+            ui.separator();
+            if edit_documents(ui, chosen, session) {
+                chat.error = None;
+            }
+            return;
+        }
+    } else if chat.task == Task::Translate && chat.figure_selection().is_some() {
+        if ui.button(tl!("Use page range")).clicked() {
+            chat.clear_selection();
+            chat.error = None;
+        }
+        return;
+    }
+    if chat.task != Task::Ask || chat.selection.is_none() {
+        range_controls(ui, doc.info.pages.len(), chat.pages_mut());
+    }
+}
+
+fn edit_documents(ui: &mut egui::Ui, chosen: &mut Vec<(DocId, (usize, usize))>, session: &Session) -> bool {
+    let mut changed = false;
+    egui::ScrollArea::vertical().id_salt("ai-open-pdfs").max_height(230.0).show(ui, |ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        for open in session.docs() {
+            let previous = chosen.iter().position(|(id, _)| *id == open.id);
+            let mut checked = previous.is_some();
+            let enabled = open.allows_copying() && (checked || chosen.len() < ai_ask::MAX_DOCUMENTS);
+            let name = ai_ask::document_label(open, session);
+            ui.push_id(open.id.0, |ui| {
+                if ui.add_enabled(enabled || checked, crate::widgets::checkbox(&mut checked, &name)).on_hover_text(&open.name).changed() {
                     if checked {
                         chosen.push((open.id, (1, open.info.pages.len())));
                     } else if let Some(index) = previous {
@@ -631,48 +741,57 @@ fn ask_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessi
                     }
                     changed = true;
                 }
-                if let Some((_, (first, last))) = chosen.iter_mut().find(|(id, _)| *id == open.id) {
-                    let count = open.info.pages.len().max(1);
-                    ui.push_id(open.id.0, |ui| {
-                        ui.horizontal(|ui| {
-                            let label = ui.label(tl!("From page"));
-                            changed |= ui.add(egui::DragValue::new(first).range(1..=count)).labelled_by(label.id).changed();
-                            let label = ui.label(tl!("To page"));
-                            changed |= ui.add(egui::DragValue::new(last).range(1..=count)).labelled_by(label.id).changed();
-                        });
-                    });
+                if let Some((_, range)) = chosen.iter_mut().find(|(id, _)| *id == open.id) {
+                    changed |= range_controls(ui, open.info.pages.len(), range);
                 }
-            }
-        });
-        if chosen.iter().any(|(id, _)| session.get(*id).is_none()) && ui.button(tl!("Remove closed PDFs")).clicked() {
-            chosen.retain(|(id, _)| session.get(*id).is_some());
-            changed = true;
-        }
-        if changed {
-            chat.clear_selection();
-            chat.ask_documents = Some(chosen);
-            chat.error = None;
+            });
         }
     });
-    if chat.selection.is_some() {
-        let name = ai_ask::document_label(doc, session);
-        let label = if chat.figure { tl!("Selected area in {name}") } else { tl!("Selected text in {name}") };
-        ui.label(crate::i18n::fmt(label, &[("name", &name)]));
-    } else if let Some(chosen) = &chat.ask_documents {
-        if chosen.is_empty() {
-            ui.label(tl!("Choose at least one PDF."));
-        }
-        egui::ScrollArea::vertical().id_salt("ai-included-pdfs").max_height(72.0).auto_shrink([false, true]).show(ui, |ui| {
-            for (id, (first, last)) in chosen {
-                if let Some(open) = session.get(*id) {
-                    ui.label(format!("{} · {first}–{last}", ai_ask::document_label(open, session)));
-                } else {
-                    ui.label(tl!("A selected PDF was closed."));
-                }
-            }
+    if chosen.is_empty() {
+        ui.label(tl!("Choose at least one PDF."));
+    }
+    if chosen.iter().any(|(id, _)| session.get(*id).is_none()) && ui.button(tl!("Remove closed PDFs")).clicked() {
+        chosen.retain(|(id, _)| session.get(*id).is_some());
+        changed = true;
+    }
+    changed
+}
+
+fn composer_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session, t: &theme::Tokens) {
+    ui.horizontal(|ui| {
+        let title = scope_summary(chat, doc);
+        let scope = ui.add(egui::Button::image_and_text(crate::icons::image("chevron-down", 12.0, t.icon), title).truncate());
+        egui::Popup::menu(&scope).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_max_width(300.0);
+            scope_menu(ui, chat, doc, session);
         });
-    } else {
-        ui.label(ai_ask::document_label(doc, session));
+        if chat.task != Task::Summarize {
+            let ocr = crate::icons::button(ui, "sliders-horizontal", 26.0, chat.scan_text || chat.figure, tl!("OCR settings"));
+            egui::Popup::menu(&ocr).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| scan_controls(ui, chat));
+        }
+    });
+    if chat.task == Task::Ask {
+        if let Some(documents) = &chat.ask_documents {
+            let entries: Vec<_> = documents
+                .iter()
+                .map(|&(id, (first, last))| {
+                    let pages = page_span(first, last);
+                    let label = if first == last { tl!("Page") } else { tl!("Pages") };
+                    session.get(id).map_or_else(|| tl!("A selected PDF was closed.").to_owned(), |doc| format!("{label} {pages} · {}", doc.name))
+                })
+                .collect();
+            if !entries.is_empty() {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(entries.join("  |  ")).small().color(t.text_muted))
+                        .truncate()
+                        .show_tooltip_when_elided(false),
+                )
+                .on_hover_text(entries.join("\n"));
+            }
+        }
+        if chat.figure && chat.destination.as_ref().is_ok_and(ai::Profile::is_llama_cpp) {
+            ui.add(crate::widgets::checkbox(&mut chat.vision, tl!("Include image for local vision")));
+        }
     }
 }
 
@@ -714,9 +833,6 @@ fn scan_controls(ui: &mut egui::Ui, chat: &mut Chat) {
                 .labelled_by(label.id);
         });
     });
-    if chat.figure && chat.task == Task::Ask && chat.destination.as_ref().is_ok_and(ai::Profile::is_llama_cpp) {
-        ui.add(crate::widgets::checkbox(&mut chat.vision, tl!("Include image for local vision")));
-    }
 }
 
 fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session, t: &theme::Tokens) -> bool {
@@ -728,35 +844,12 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessio
             ui.set_width(ui.available_width().max(1.0));
             let mut send_key = false;
             ui.add_enabled_ui(can_edit, |ui| {
-                if chat.task == Task::Ask {
-                    ask_scope(ui, chat, doc, session);
-                }
-                if chat.task == Task::Translate
-                    && let Some((page, _)) = chat.figure_selection()
-                {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(format!("{} · {page}", tl!("Selected area")));
-                        if ui.button(tl!("Use page range")).clicked() {
-                            chat.clear_selection();
-                        }
-                    });
-                } else if chat.task != Task::Ask || (chat.selection.is_none() && chat.ask_documents.is_none()) {
-                    let count = doc.info.pages.len().max(1);
-                    let (first, last) = chat.pages_mut();
-                    ui.horizontal_wrapped(|ui| {
-                        let label = ui.label(tl!("From page"));
-                        ui.add(egui::DragValue::new(first).range(1..=count)).labelled_by(label.id);
-                        let label = ui.label(tl!("To page"));
-                        ui.add(egui::DragValue::new(last).range(1..=count)).labelled_by(label.id);
-                    });
-                }
-                if chat.task != Task::Summarize {
-                    scan_controls(ui, chat);
-                }
+                composer_scope(ui, chat, doc, session, t);
                 match chat.task {
                     Task::Ask => {
                         let label = ui.label(tl!("Question"));
                         let field = egui::TextEdit::multiline(&mut chat.question)
+                            .id(question_id(doc.id))
                             .hint_text(tl!("Ask about the selected sources…"))
                             .desired_rows(2)
                             .desired_width(ui.available_width())
@@ -1081,17 +1174,31 @@ mod tests {
             app
         });
         h.run_steps(4);
-        h.get_by_label("Selected area in figure.pdf");
+        h.get_by_label("Area on page 2");
+        assert!(h.query_by_label("Selected area in figure.pdf").is_none());
+        assert!(h.query_by_label("OCR source language").is_none());
+        assert!(h.query_by_label("OCR engine").is_none());
+        h.get_by_label("OCR settings").click();
+        h.run_steps(4);
         h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "OCR source language");
         h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "OCR engine");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(4);
+        h.get_by_label("Area on page 2");
+        assert!(h.query_by_label("OCR engine").is_none());
         h.get_by_label("Include image for local vision").click();
         h.run_steps(4);
         h.get_by_label("Sends the selected image and any OCR labels to the local model.");
         h.get_by_label("Translate").click();
         h.run_steps(4);
-        h.get_by_label("Selected area · 2");
+        h.get_by_label("Area on page 2").click();
+        h.run_steps(4);
         assert!(h.query_by_label("Include image for local vision").is_none());
         h.get_by_label("Use page range").click();
+        h.run_steps(4);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(4);
+        h.get_by_label("OCR settings").click();
         h.run_steps(4);
         h.get_by_label("Recognize scanned text locally").click();
         h.run_steps(4);
@@ -1099,6 +1206,35 @@ mod tests {
         let (_, id) = h.state().active_ids().unwrap();
         let chat = h.state().ai_chats.get(&id).unwrap();
         assert!(chat.selection.is_none() && chat.scan_text && !chat.vision);
+    }
+
+    #[test]
+    fn escape_clears_the_snapshot_and_chat_scope_without_erasing_the_draft() {
+        let bytes = Session::new().create_blank(300.0, 400.0, 2).unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("figure.pdf", None, bytes.as_ref().clone()).unwrap();
+            let (view, id) = app.active_ids().unwrap();
+            let rect = [10.0, 20.0, 90.0, 120.0];
+            app.quick_tool = crate::QuickTool::Snapshot;
+            app.views[view].area_pick = Some((1, rect));
+            open_region(&mut app, view, 2, rect, Task::Ask);
+            app.ai_chats.get_mut(&id).unwrap().question = "What is shown here?".into();
+            app
+        });
+        h.run_steps(4);
+        h.get_by_role_and_label(egui::accesskit::Role::MultilineTextInput, "Question").click();
+        h.run_steps(4);
+        let (_, doc) = h.state().active_ids().unwrap();
+        assert!(question_has_focus(&h.ctx, doc));
+        h.key_press(egui::Key::Escape);
+        h.run_steps(4);
+        let (view, id) = h.state().active_ids().unwrap();
+        let chat = &h.state().ai_chats[&id];
+        assert!(h.state().views[view].area_pick.is_none());
+        assert!(chat.selection.is_none());
+        assert_eq!(chat.question, "What is shown here?");
     }
 
     #[test]
@@ -1164,13 +1300,18 @@ mod tests {
         let owner = h.state().views[0].id;
         let target = h.state().views[1].id;
         let target_label = format!("paper.pdf #{}", target.0);
-        h.get_by_role_and_label(Role::Button, "Choose PDFs…").click();
+        assert!(h.query_by_label("Multiple PDFs…").is_none());
+        h.get_by_role_and_label(Role::Button, "This PDF · all pages").click();
+        h.run_steps(4);
+        h.get_by_label("Multiple PDFs…").click();
         h.run_steps(4);
         h.get_by_label(&target_label).click();
         h.run_steps(4);
         assert_eq!(h.state().ai_chats[&owner].ask_documents, Some(vec![(owner, (1, 1)), (target, (1, 1))]));
         h.key_press(egui::Key::Escape);
         h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "2 PDFs");
+        assert!(h.query_by_label("From page").is_none());
 
         let doc = h.state().session.get(target).unwrap();
         let index = ai_ask::Index::build(vec![ai_ask::source(doc, 1, 1).unwrap()], || false).unwrap();

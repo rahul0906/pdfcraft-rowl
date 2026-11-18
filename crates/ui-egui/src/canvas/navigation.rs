@@ -217,9 +217,41 @@ impl DocView {
         self.camera.is_some()
             || self.camera_done.is_some()
             || self.forms.focus.is_some()
-            || self.selection.is_some()
-            || self.all_text
+            || self.has_reading_selection()
+            || self.marquee.is_some()
             || self.find.as_ref().is_some_and(|f| !f.in_panel)
+    }
+
+    fn has_reading_selection(&self) -> bool {
+        self.selection.is_some() || self.all_text || self.area_pick.is_some()
+    }
+
+    pub(crate) fn escape_reading_selection(
+        &mut self,
+        ctx: &egui::Context,
+        keys: crate::page_keys::PageKeys,
+        chat_selection: bool,
+        question_focused: bool,
+    ) -> bool {
+        // A live drag is cancelled by the page's press handler, which also ignores its release.
+        let free =
+            self.camera.is_none() && self.camera_done.is_none() && self.forms.focus.is_none() && !self.selection_drag && self.marquee.is_none();
+        if free
+            && (chat_selection || self.has_reading_selection())
+            && (question_focused || !ctx.egui_wants_keyboard_input())
+            && keys.take(ctx, egui::Key::Escape)
+        {
+            self.clear_reading_selection();
+            return true;
+        }
+        false
+    }
+
+    fn clear_reading_selection(&mut self) {
+        self.clear_selection();
+        self.all_text = false;
+        self.area_pick = None;
+        self.area_choice = None;
     }
 
     /// Next page (`true`) or previous page. In two-page view this moves a whole spread: the other
@@ -406,9 +438,8 @@ fn escape_closes_one(view: &mut DocView) {
     } else if view.forms.focus.is_some() {
         // A form field being filled takes this Esc: its editor closes it, and nothing else on
         // the page closes with it (a selection stays for the next Esc).
-    } else if view.selection.is_some() || view.all_text {
-        view.selection = None;
-        view.all_text = false;
+    } else if view.has_reading_selection() {
+        view.clear_reading_selection();
     } else if view.presentation.is_none() || view.find.as_ref().is_some_and(|f| !f.in_panel) {
         // Full screen hides the Search panel: its search stays for when the panel is back.
         view.find = None;
