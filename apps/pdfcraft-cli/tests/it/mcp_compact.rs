@@ -55,6 +55,12 @@ fn ai_mcp_lists_the_tools_and_discovers_models_in_compact_mode() {
             assert_eq!(fields["confirmed_endpoint"]["type"], "string", "{name}");
             assert_eq!(fields["confirmed_model"]["type"], "string", "{name}");
         }
+        if name == "ai_ask" {
+            let fields = &tool["inputSchema"]["properties"];
+            assert_eq!(fields["documents"]["type"], "array");
+            assert_eq!(fields["selection"]["type"], "object");
+            assert_eq!(fields["confirmed_scope"]["type"], "string");
+        }
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

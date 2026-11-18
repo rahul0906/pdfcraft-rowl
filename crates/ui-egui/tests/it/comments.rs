@@ -4535,6 +4535,21 @@ fn the_selection_bar_stays_inside_the_pages_area() {
     assert!(viewport.contains_rect(bar), "bar {bar:?} inside {viewport:?}");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn ai_ask_from_the_selection_bar_opens_with_selected_text_scope() {
+    let mut h = harness(|_| {});
+    assert!(support::step_until(&mut h, |h| h.state().views[0].glyph_screen_pos(0, 2).is_some()));
+    h.state_mut().views[0].select_text(0, 0, 2);
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::Button, "Ask AI").click();
+    h.run_steps(5);
+    h.get_by_label("Selected text in text.pdf");
+    h.get_by_role_and_label(Role::Button, "Choose PDFs…");
+    h.get_by_role_and_label(Role::MultilineTextInput, "Question");
+    assert!(h.query_by_label("From page").is_none());
+}
+
 /// `n` pages with one comment each, "Card 1" to "Card n".
 fn one_comment_per_page(n: usize) -> Vec<u8> {
     let mut objs = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string()];

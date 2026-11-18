@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use pdfcraft_render::{PageRenderer, RenderRequest, RequestKind};
+use pdfcraft_render::{PageRenderer, RenderRequest, RequestKind, text::PageText};
 
 use crate::Document;
 
@@ -14,10 +14,10 @@ const MAX_ANNOTATIONS_PER_PAGE: usize = 10_000;
 
 pub struct SummarySource {
     bytes: std::sync::Arc<Vec<u8>>,
-    display: std::sync::Arc<Vec<u8>>,
-    config: pdfcraft_render::RenderConfig,
-    first: usize,
-    last: usize,
+    pub(crate) display: std::sync::Arc<Vec<u8>>,
+    pub(crate) config: pdfcraft_render::RenderConfig,
+    pub(crate) first: usize,
+    pub(crate) last: usize,
 }
 
 impl SummarySource {
@@ -62,10 +62,25 @@ impl SummarySource {
     }
 
     pub(crate) fn visit_text(self, mut visit: impl FnMut(usize, &str) -> Result<(), String>) -> Result<(), String> {
+        let mut found = false;
+        self.visit_pages(|page, text| {
+            let text = text.plain_text();
+            if !text.trim().is_empty() {
+                found = true;
+                visit(page, text.trim())?;
+            }
+            Ok(())
+        })?;
+        if !found {
+            return Err(NO_SELECTABLE_TEXT.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn visit_pages(self, mut visit: impl FnMut(usize, &PageText) -> Result<(), String>) -> Result<(), String> {
         crate::guard(|| {
             self.check_redactions()?;
             let mut renderer = PageRenderer::new(self.display, self.config);
-            let mut found = false;
             for page in self.first - 1..self.last {
                 let result = renderer.render(RenderRequest { page, kind: RequestKind::Text, scale: 1.0, ..Default::default() });
                 if result.error.is_some() {
@@ -75,15 +90,7 @@ impl SummarySource {
                 if text.truncated {
                     return Err(format!("Page {} has more text than PdfCraft can extract safely.", page + 1));
                 }
-                let text = text.plain_text();
-                let text = text.trim();
-                if !text.is_empty() {
-                    found = true;
-                    visit(page + 1, text)?;
-                }
-            }
-            if !found {
-                return Err("The selected pages have no selectable text. Run Scan & OCR on scanned pages first.".into());
+                visit(page + 1, &text)?;
             }
             Ok(())
         })?
@@ -117,3 +124,5 @@ impl SummarySource {
         Ok(())
     }
 }
+
+pub(crate) const NO_SELECTABLE_TEXT: &str = "The selected pages have no selectable text. Run Scan & OCR on scanned pages first.";

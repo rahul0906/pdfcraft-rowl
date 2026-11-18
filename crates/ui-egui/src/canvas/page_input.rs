@@ -1076,26 +1076,18 @@ pub(super) fn page_overlays(ui: &mut egui::Ui, view: &mut DocView, frame: &mut P
             painter.rect_filled(sr, CornerRadius::same(2), mc.gamma_multiply(0.28));
         }
     }
-    if let Some((fp, fr, t0)) = view.flash
-        && fp == i
+    if let Some((fp, rect, t0)) = &mut view.flash
+        && *fp == i
+        && !paint_navigation_flash(ui, painter, &xf, info, i, std::slice::from_ref(rect), t0)
     {
-        let now = ui.input(|inp| inp.time);
-        let t0 = if t0 == 0.0 { now } else { t0 };
-        view.flash = Some((fp, fr, t0));
-        let age = (now - t0) as f32;
-        if age < 1.6 {
-            let a = ((1.6 - age) / 1.6 * 255.0) as u8;
-            let sr = xf.user_rect(info, i, fr).expand(4.0);
-            painter.rect_stroke(
-                sr,
-                CornerRadius::same(3),
-                Stroke::new(2.5, Color32::from_rgba_unmultiplied(0x1B, 0x63, 0xE0, a)),
-                egui::StrokeKind::Outside,
-            );
-            ui.ctx().request_repaint();
-        } else {
-            view.flash = None;
-        }
+        view.flash = None;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some((fp, rects, t0)) = &mut view.citation_flash
+        && *fp == i
+        && !paint_navigation_flash(ui, painter, &xf, info, i, rects, t0)
+    {
+        view.citation_flash = None;
     }
     // The sign tabs (above). Like the validation badges, they never enter the file,
     // exports or printing.
@@ -1127,6 +1119,36 @@ pub(super) fn page_overlays(ui: &mut egui::Ui, view: &mut DocView, frame: &mut P
             view.cursor.describe(Subject::SignatureBadge, crate::i18n::t(badge.summary).to_string());
         }
     }
+}
+
+fn paint_navigation_flash(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    xf: &PageXform,
+    info: &DocInfo,
+    page: usize,
+    rects: &[[f32; 4]],
+    started: &mut f64,
+) -> bool {
+    let now = ui.input(|inp| inp.time);
+    if *started == 0.0 {
+        *started = now;
+    }
+    let age = (now - *started) as f32;
+    if age >= 1.6 {
+        return false;
+    }
+    let a = ((1.6 - age) / 1.6 * 255.0) as u8;
+    for &rect in rects {
+        painter.rect_stroke(
+            xf.user_rect(info, page, rect).expand(4.0),
+            CornerRadius::same(3),
+            Stroke::new(2.5, Color32::from_rgba_unmultiplied(0x1B, 0x63, 0xE0, a)),
+            egui::StrokeKind::Outside,
+        );
+    }
+    ui.ctx().request_repaint();
+    true
 }
 
 fn paint_field_highlights(painter: &egui::Painter, xf: &PageXform, info: &DocInfo, form: &[pdfcraft_engine::FormField], page: usize, enabled: bool) {

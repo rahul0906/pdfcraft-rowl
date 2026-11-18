@@ -405,6 +405,14 @@ enum SelectionAction {
     Markup(comments::CommentTool),
     Replace,
     Copy,
+    #[cfg(target_os = "macos")]
+    Ask,
+}
+
+pub(super) enum SelectionCommand {
+    Copy,
+    #[cfg(target_os = "macos")]
+    Ask(pdfcraft_engine::ai_ask::Selection),
 }
 
 /// The selection bar's width before it has been laid out once (English labels).
@@ -446,28 +454,26 @@ pub(super) fn selection_actions(
     prefs: &comments::CommentPrefs,
     can_comment: bool,
     can_copy: bool,
-) -> bool {
+) -> Option<SelectionCommand> {
     if ui.input(|input| input.pointer.is_decidedly_dragging()) {
-        return false;
+        return None;
     }
     let Some(selection) = view.selection else {
         view.actions_dismissed = None;
-        return false;
+        return None;
     };
     if view.actions_dismissed == Some(selection) {
-        return false;
+        return None;
     }
-    if view.selected_text().is_none() {
-        return false;
-    }
-    let Some(texts) = view.selection_texts() else { return false };
-    let Some((page, last)) = bar_anchor(&selection, &texts) else { return false };
-    let Some(xf) = view.page_xform(page) else { return false };
+    view.selected_text()?;
+    let texts = view.selection_texts()?;
+    let (page, last) = bar_anchor(&selection, &texts)?;
+    let xf = view.page_xform(page)?;
     // A comment or a replacement sits on one page: across pages, only markup and Copy.
     let across_pages = selection.spans_pages();
     let rect = xf.view_rect(last);
     if !viewport.intersects(rect) {
-        return false;
+        return None;
     }
     let id = egui::Id::unique(("text-selection-actions", view.view_key()));
     // The bar stays inside the pages' area, by the width it had last frame (its labels make it
@@ -478,7 +484,8 @@ pub(super) fn selection_actions(
     let mut chosen = None;
     egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pos2(x, y)).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.set_max_width((viewport.width() - 30.0).max(80.0));
+            ui.horizontal_wrapped(|ui| {
                 for (label, action) in [
                     (tl!("Add comment"), SelectionAction::Note),
                     (tl!("Highlight"), SelectionAction::Markup(comments::CommentTool::Highlight)),
@@ -494,23 +501,40 @@ pub(super) fn selection_actions(
                 if ui.add_enabled(can_copy, egui::Button::new(tl!("Copy"))).clicked() {
                     chosen = Some(SelectionAction::Copy);
                 }
+                #[cfg(target_os = "macos")]
+                if ui.add_enabled(can_copy, egui::Button::new(tl!("Ask AI"))).clicked() {
+                    chosen = Some(SelectionAction::Ask);
+                }
             });
         });
     });
-    let Some(action) = chosen else { return false };
+    let action = chosen?;
     if let SelectionAction::Copy = action {
         // Copying closes the bar but keeps the words selected, for ⌘C or a second action.
         view.actions_dismissed = Some(selection);
-        return true;
+        return Some(SelectionCommand::Copy);
+    }
+    #[cfg(target_os = "macos")]
+    if let SelectionAction::Ask = action {
+        use pdfcraft_engine::ai_ask::Selection as AiSelection;
+        view.actions_dismissed = Some(selection);
+        let page = selection.page.saturating_add(1);
+        let selection = match selection.span {
+            Span::Run { anchor, head, head_page, head_x } => {
+                AiSelection::Run { anchor: (page, anchor), head: (head_page.saturating_add(1), head), head_x }
+            }
+            Span::Column { rect } => AiSelection::Rect { page, rect },
+        };
+        return Some(SelectionCommand::Ask(selection));
     }
     let marks = view.selection_quads(info);
     if marks.is_empty() {
-        return false;
+        return None;
     }
     match action {
         SelectionAction::Note | SelectionAction::Replace => {
             // Disabled across pages (above).
-            let Ok([(page, quads)]) = <[_; 1]>::try_from(marks) else { return false };
+            let [(page, quads)] = <[_; 1]>::try_from(marks).ok()?;
             let last = quads.last().copied().unwrap_or_default();
             let at = [last[2].max(last[6]), last[1].max(last[3])];
             view.clear_selection();
@@ -524,7 +548,7 @@ pub(super) fn selection_actions(
         }
         SelectionAction::Markup(tool) => {
             // Every markup button carries a markup tool; anything else adds nothing.
-            let Some(kind) = tool.markup() else { return false };
+            let kind = tool.markup()?;
             view.clear_selection();
             let edits = marks.into_iter().map(|(page, quads)| {
                 Edit::AddAnnotation(pdfcraft_engine::NewAnnotation {
@@ -539,6 +563,8 @@ pub(super) fn selection_actions(
         }
         // Copy is dispatched through the app after the view borrow ends.
         SelectionAction::Copy => {}
+        #[cfg(target_os = "macos")]
+        SelectionAction::Ask => {}
     }
-    false
+    None
 }

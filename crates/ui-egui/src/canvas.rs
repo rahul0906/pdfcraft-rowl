@@ -556,6 +556,9 @@ pub struct DocView {
     single_edges: Option<(usize, bool, bool)>,
     /// Briefly outline an annotation after navigating to it from a panel.
     pub flash: Option<(usize, [f32; 4], f64)>,
+    /// Briefly outline the cited passage, one user-space rectangle per selected line.
+    #[cfg(target_os = "macos")]
+    pub(crate) citation_flash: Option<(usize, Vec<[f32; 4]>, f64)>,
     /// Compare files: differences shaded on this document's pages (page, user-space box, colour).
     pub compare_marks: Vec<(usize, [f32; 4], Color32)>,
     /// The interface the document hid in this tab, and what is hidden now (ISO 32000-2 Table 147
@@ -1090,6 +1093,8 @@ impl DocView {
             side_edges: None,
             single_edges: None,
             flash: None,
+            #[cfg(target_os = "macos")]
+            citation_flash: None,
             compare_marks: Vec::new(),
             interface: Default::default(),
             presentation: None,
@@ -1251,6 +1256,10 @@ impl DocView {
         self.zoom_anchor = None;
         self.find_hold = None;
         self.flash = None;
+        #[cfg(target_os = "macos")]
+        {
+            self.citation_flash = None;
+        }
         // Thumbnail drags hold page indexes from before the change.
         self.panel_drag = None;
         self.org_drag = None;
@@ -3519,7 +3528,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         javascript_link,
         comment_notice,
         copy_comments,
-        mut copy_selected,
+        copy_selected,
         field_menu,
         field_placed,
         mut field_props,
@@ -3557,10 +3566,11 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
 
     view.viewport_screen = out.inner_rect;
     view.auto_scroll.paint(ui, avail);
-    if unobstructed && matches!(tool, QuickTool::Select | QuickTool::ColumnSelect) {
-        copy_selected |= selection_actions(ui, avail, view, info, prefs, allowed && !comments_hidden, can_copy);
-    }
-
+    let selection_command = if unobstructed && matches!(tool, QuickTool::Select | QuickTool::ColumnSelect) {
+        selection_actions(ui, avail, view, info, prefs, allowed && !comments_hidden, can_copy)
+    } else {
+        None
+    };
     // Collect all main-page demand, including cached surfaces, for byte admission later.
     // Pan-settle debounce for tiled pages: each tile costs a full page interpret, so holding
     // fresh tiles back while the scroll offset is still moving keeps a drag on the stretched
@@ -3646,6 +3656,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         open_table,
         form_notice,
         copy_selected,
+        selection_command,
         copy_comments,
         paste_comments_at,
         comment_notice,
@@ -3672,6 +3683,7 @@ struct FrameRequests {
     open_table: Option<(usize, [f64; 4])>,
     form_notice: Option<crate::forms_ui::FormNotice>,
     copy_selected: bool,
+    selection_command: Option<selection::SelectionCommand>,
     /// Copy comments / Paste comments from the page's menu or a Comments panel card, and what
     /// the comment tools have to say.
     copy_comments: bool,
@@ -3701,6 +3713,7 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
         open_table,
         form_notice,
         copy_selected,
+        selection_command,
         copy_comments,
         paste_comments_at,
         comment_notice,
@@ -3914,6 +3927,14 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
     }
     if copy_selected {
         app.execute("edit.copy");
+    }
+    match selection_command {
+        Some(selection::SelectionCommand::Copy) if !copy_selected => {
+            app.execute("edit.copy");
+        }
+        #[cfg(target_os = "macos")]
+        Some(selection::SelectionCommand::Ask(selection)) => crate::ai_chat_ui::open_selection(app, index, selection),
+        Some(selection::SelectionCommand::Copy) | None => {}
     }
     if copy_comments {
         app.execute("comment.copy");

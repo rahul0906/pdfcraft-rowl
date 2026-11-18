@@ -193,7 +193,9 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 }
                 #[cfg(target_os = "macos")]
                 if panel == RightPanel::AiChat {
-                    if crate::ai_chat_ui::panel(ui, &t, doc, view.current.saturating_add(1), &mut app.ai_chats, &mut nav) {
+                    let owner = app.ai_chat_anchor.and_then(|id| app.session.get(id)).unwrap_or(doc);
+                    let page = if owner.id == doc.id { view.current.saturating_add(1) } else { 1 };
+                    if crate::ai_chat_ui::panel(ui, &t, owner, &app.session, page, &mut app.ai_chats, &mut nav) {
                         app.dialog = Some(crate::Dialog::Preferences);
                     }
                     return;
@@ -511,6 +513,8 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             }
             v.flash = Some((p, r, 0.0));
         }
+        #[cfg(target_os = "macos")]
+        Some(Nav::AiCitation(owner, page, location)) => crate::ai_chat_ui::reveal_citation(app, owner, page, location),
         None => {}
     }
 }

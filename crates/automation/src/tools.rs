@@ -260,13 +260,18 @@ pub fn tools() -> Vec<ToolDef> {
                 "provider": {"type":"string", "description":"Use a saved llama.cpp profile, including its Keychain credential when configured."}
             }), &[])),
         #[cfg(target_os = "macos")]
-        t("ai_ask", "Ask about this PDF", "Search the selected pages locally and ask an AI provider using matching passages. First preview with user_confirmed omitted, then tell the user that the question, optional previous turn, and matching passages can be sent to the shown provider. After consent, repeat the call with user_confirmed true and the previewed endpoint and model. Returns only verified source references. Provider charges may apply.")
+        t("ai_ask", "Ask about selected PDFs", "Search the chosen PDFs locally or use a text selection. First preview with user_confirmed omitted, then tell the user which text, question and optional previous turn can be sent to the shown provider. After consent, repeat with user_confirmed true and the previewed endpoint and model. With documents or selection, also echo scope_token as confirmed_scope. Provider charges may apply.")
             .cmd("ai.ask")
             .with(schema(json!({ "doc": doc(), "question": { "type": "string", "minLength": 1 },
+                "documents": {"type":"array", "minItems":1, "maxItems": pdfcraft_engine::ai_ask::MAX_DOCUMENTS,
+                    "items":schema(json!({"doc":doc(),"first_page":{"type":"integer","minimum":1},"last_page":{"type":"integer","minimum":1}}), &["doc"]),
+                    "description":"Open PDFs with optional 1-based page ranges. Omit doc, selection and top-level page bounds."},
+                "selection": schema(json!({"page":{"type":"integer","minimum":1},"rect":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"[x0,y0,x1,y1] in points from the top-left of the displayed page."}}), &["page", "rect"]),
                 "previous_question": { "type": "string" }, "previous_answer": { "type": "string" },
                 "provider": { "type": "string" }, "first_page": { "type": "integer", "minimum": 1 }, "last_page": { "type": "integer", "minimum": 1 },
-                "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" }
-            }), &["doc", "question"])),
+                "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" },
+                "confirmed_scope": { "type":"string" }
+            }), &["question"])),
         #[cfg(target_os = "macos")]
         t("ai_summarize", "Summarize PDF with an AI provider", "Preview the provider and page range with user_confirmed omitted. Ask the user before sending the selected PDF text. To send, set user_confirmed to true and repeat the endpoint and model from the preview. The call may incur provider charges and does not modify the PDF.")
             .cmd("ai.summary")

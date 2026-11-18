@@ -7,13 +7,17 @@ const BIN: &str = env!("CARGO_BIN_EXE_pdfcraft-cli");
 
 /// A PDF with `n` 200×300 pt pages reading "Page 1", "Page 2", …
 fn fixture(n: usize) -> Vec<u8> {
+    fixture_streams((1..=n).map(|i| format!("BT /F1 24 Tf 20 150 Td (Page {i}) Tj ET")).collect())
+}
+
+fn fixture_streams(streams: Vec<String>) -> Vec<u8> {
+    let n = streams.len();
     let mut objs: Vec<Vec<u8>> = vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()];
     let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
     objs.push(format!("<< /Type /Pages /Kids [{}] /Count {n} /MediaBox [0 0 200 300] >>", kids.join(" ")).into_bytes());
     objs.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec());
-    for i in 0..n {
+    for (i, body) in streams.into_iter().enumerate() {
         objs.push(format!("<< /Type /Page /Parent 2 0 R /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>", 5 + 2 * i).into_bytes());
-        let body = format!("BT /F1 24 Tf 20 150 Td (Page {}) Tj ET", i + 1);
         objs.push(format!("<< /Length {} >>\nstream\n{body}\nendstream", body.len()).into_bytes());
     }
     let mut out = b"%PDF-1.7\n".to_vec();
@@ -297,6 +301,147 @@ fn ai_summary_supports_responses_endpoint_and_output() {
 #[test]
 fn ai_ask_retrieves_follow_up_context_and_validates_citations() {
     ai_provider_mock(true, "ai_ask");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ai_ask_across_selected_pdfs_binds_scope_and_cites_each_file() {
+    use std::net::TcpListener;
+
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let paths = ["old/paper.pdf", "new/paper.pdf", "excluded.pdf"];
+    let statements = ["Sample size was 30.", "Sample size was 60.", "Sample size was 99."];
+    std::fs::create_dir_all(root.join("old")).unwrap();
+    std::fs::create_dir_all(root.join("new")).unwrap();
+    let pdf = |text| fixture_streams(vec![format!("BT /F1 12 Tf 20 220 Td ({text}) Tj ET")]);
+    for (path, text) in paths.into_iter().zip(statements) {
+        std::fs::write(root.join(path), pdf(text)).unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = write_ai_test_profile(root, &listener);
+    let run = |arguments: Value| {
+        let mut steps: Vec<_> = paths.iter().map(|path| json!({"tool":"doc_open", "args":{"path":path}})).collect();
+        steps.push(json!({"tool":"ai_ask", "args":arguments}));
+        run_ai_script(root, json!(steps))
+    };
+    let mut args = json!({"documents":[{"doc":1},{"doc":2}],"question":"What was the sample size?"});
+    let (ok, preview) = run(args.clone());
+    assert!(ok, "{preview}");
+    let preview = &preview["steps"][3]["result"][0];
+    assert_eq!(preview["sent"], false);
+    assert_eq!(preview["documents"][0]["document"], "paper.pdf #1");
+    assert_eq!(preview["documents"][1]["document"], "paper.pdf #2");
+    args["user_confirmed"] = json!(true);
+    args["confirmed_endpoint"] = json!(endpoint);
+    args["confirmed_model"] = json!("mock-model");
+    args["confirmed_scope"] = preview["scope_token"].clone();
+
+    let mut wrong = args.clone();
+    wrong["documents"][1]["doc"] = json!(3);
+    let (ok, report) = run(wrong);
+    assert!(!ok && report["steps"][3]["error"].as_str().unwrap().contains("scope token"), "{report}");
+    std::fs::write(root.join(paths[1]), pdf("Sample size was 70.")).unwrap();
+    let (ok, report) = run(args.clone());
+    assert!(!ok && report["steps"][3]["error"].as_str().unwrap().contains("scope token"), "{report}");
+    std::fs::write(root.join(paths[1]), pdf(statements[1])).unwrap();
+
+    let mut paraphrase = args.clone();
+    paraphrase["question"] = json!("How big was the cohort?");
+    let (ok, report) = run(paraphrase);
+    assert!(ok, "{report}");
+    assert_eq!(report["steps"][3]["result"][0]["sent"], false, "the keyword index should decline an unsupported paraphrase");
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let (socket, body) = ai_mock_request(&listener, "POST /v1/chat/completions");
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            let instruction = payload["messages"][0]["content"].as_str().unwrap();
+            assert!(instruction.contains("When documents disagree"));
+            let input: Value = serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                input["sources"],
+                json!([
+                    {"source":1,"document":"paper.pdf #1","page":1,"text":statements[0]},
+                    {"source":2,"document":"paper.pdf #2","page":1,"text":statements[1]}
+                ])
+            );
+            ai_mock_reply(socket, r#"{"choices":[{"message":{"content":"One reports 30 [S1], the other 60 [S2]. [S999]"},"finish_reason":"stop"}]}"#);
+        });
+        let (ok, report) = run(args);
+        server.join().unwrap();
+        assert!(ok, "{report}");
+        let result = &report["steps"][3]["result"][0];
+        assert_eq!(result["sent"], true);
+        assert_eq!(result["answer"].as_str().unwrap().trim(), "One reports 30 [paper.pdf #1, page 1], the other 60 [paper.pdf #2, page 1].");
+        let cites = result["citations"].as_array().unwrap();
+        assert_eq!(cites.len(), 2);
+        for (i, cite) in cites.iter().enumerate() {
+            assert_eq!(cite["location"]["doc"], i + 1);
+            assert_eq!(cite["location"]["revision"], preview["documents"][i]["revision"]);
+            assert_eq!(cite["excerpt"], statements[i]);
+            assert_eq!(cite["location"]["rects"].as_array().unwrap().len(), 1);
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ai_ask_text_selection_sends_only_the_selected_text() {
+    use std::net::TcpListener;
+
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let pdf = fixture_streams(vec!["BT /F1 12 Tf 20 220 Td (Selected passage.) Tj 0 -40 Td (Private note.) Tj ET".into()]);
+    std::fs::write(root.join("selection.pdf"), pdf).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = write_ai_test_profile(root, &listener);
+    let run = |args| {
+        run_ai_script(
+            root,
+            json!([
+                {"tool":"doc_open","args":{"path":"selection.pdf"}}, {"tool":"ai_ask","args":args}
+            ]),
+        )
+    };
+    let mut args = json!({"doc":1,"selection":{"page":1,"rect":[10,65,190,95]},"question":"What does this mean?"});
+    let (ok, report) = run(args.clone());
+    assert!(ok, "{report}");
+    args["user_confirmed"] = json!(true);
+    args["confirmed_endpoint"] = json!(endpoint);
+    args["confirmed_model"] = json!("mock-model");
+    args["confirmed_scope"] = report["steps"][1]["result"][0]["scope_token"].clone();
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let (socket, body) = ai_mock_request(&listener, "POST /v1/chat/completions");
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            let input: Value = serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(input["sources"], json!([{"source":1,"document":"selection.pdf","page":1,"text":"Selected passage."}]));
+            assert_eq!(input["recent_turns"], json!([]));
+            ai_mock_reply(socket, r#"{"choices":[{"message":{"content":"The selected words [S1]."},"finish_reason":"stop"}]}"#);
+        });
+        let (ok, report) = run(args);
+        server.join().unwrap();
+        assert!(ok, "{report}");
+        assert_eq!(report["steps"][1]["result"][0]["citations"][0]["excerpt"], "Selected passage.");
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn write_ai_test_profile(root: &std::path::Path, listener: &std::net::TcpListener) -> String {
+    let settings = root.join("Library/Application Support/PdfCraft");
+    std::fs::create_dir_all(&settings).unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let preferences = serde_json::json!({"active":"Mock","profiles":[{"name":"Mock","base_url":base_url,"model":"mock-model"}]});
+    std::fs::write(settings.join("ai-providers.json"), preferences.to_string()).unwrap();
+    format!("{base_url}/chat/completions")
 }
 
 #[cfg(target_os = "macos")]

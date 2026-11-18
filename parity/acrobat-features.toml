@@ -9858,8 +9858,8 @@ milestone = "M13"
 status = "partial"
 commands = ["ai.ask"]
 tools = ["ai_ask"]
-evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_ask_retrieves_follow_up_context_and_validates_citations"]
-notes = "macOS document chat with local keyword retrieval, follow-up turns, local transcripts and page citations."
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_ask_retrieves_follow_up_context_and_validates_citations", "apps/pdfcraft-cli/tests/it/text.rs::ai_ask_across_selected_pdfs_binds_scope_and_cites_each_file", "apps/pdfcraft-cli/tests/it/text.rs::ai_ask_text_selection_sends_only_the_selected_text", "crates/ui-egui/src/ai_chat_ui.rs::ask_picks_open_pdfs_and_highlights_the_cited_same_named_tab", "crates/ui-egui/tests/it/comments.rs::ai_ask_from_the_selection_bar_opens_with_selected_text_scope"]
+notes = "macOS document chat with local keyword retrieval across chosen PDFs or a text selection, scoped follow-up turns, local transcripts and passage citations."
 
 [[feature]]
 id = "misc.ai-conversational-edit"

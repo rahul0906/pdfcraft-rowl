@@ -30,6 +30,8 @@ dependencies need it, and the workspace `rust-version` states the same minimum.
 
 ## AI Assistant on macOS
 
+The [AI reading roadmap](ai-reading-roadmap.md) records the planned features, their order, and the tests required for each phase.
+
 Open **Preferences → AI Providers**, add a profile with a base URL and model ID, then select
 **Use provider**. The OpenAI preset uses `https://api.openai.com/v1`. Choose **Chat Completions**
 or **Responses** according to the provider's documentation. For Meta's `muse-ember-1.0`, use
@@ -54,9 +56,13 @@ Open a PDF and choose **AI Assistant → Ask about this document**, **Summarize*
 **Translate**. All three open the same sidebar. Review the provider and page range in the
 composer at the bottom. Results appear above it, with a **Copy** button for each answer.
 
-- **Ask** searches the selected pages locally and sends matching excerpts, your question,
-  and up to four recent Ask turns from the same range. Click a citation to navigate to its
-  page, or hover to read the excerpt. Retrieval covers up to 1,000 pages and 4 MiB of text.
+- **Ask** searches the selected pages locally. Open **Choose PDFs…** to include up to six open
+  PDFs and set each page range. Requests send your question, matching excerpts, and up to four
+  recent Ask turns from the same scope. A citation opens its PDF and highlights the passage.
+  Retrieval covers up to 1,000 pages and 4 MiB of text in total.
+- Highlight text and click **Ask AI** to ask about just the selection. The selection can span up
+  to six pages and contain up to 7,200 bytes of extracted text. **Choose PDFs…** can broaden the
+  scope explicitly.
 - **Summarize** sends text from the selected pages, up to 50 pages and 64 KiB per request.
 - **Translate** starts with the current page when opening the conversation. Choose a
   target language from the dropdown, then select up to 10 pages or 12 KiB of text.
@@ -72,6 +78,11 @@ CLI and MCP expose `ai_ask`, `ai_summarize`, and `ai_translate`. The first call 
 endpoint and model. After the user confirms, repeat with `user_confirmed: true`,
 `confirmed_endpoint`, and `confirmed_model`. Summaries and translations require
 `first_page` and `last_page`. Translation also requires `target_language`.
+For multiple PDFs, pass `documents`, an array of open `doc` IDs in objects with optional
+`first_page` and `last_page`. For selected text, pass `doc` and a `selection` with a 1-based
+`page` and `rect` in displayed page points. For both forms, echo the preview's `scope_token`
+as `confirmed_scope` along with the confirmed endpoint and model. The answer's citations
+include a document ID, revision, and passage rectangles in displayed page points.
 Use `ai_llama_models` to list available models without sending a prompt or any PDF text.
 It accepts a loopback `base_url` for a keyless server or the name of a saved llama.cpp
 `provider` for a server with a Keychain credential. With neither argument it uses
@@ -87,6 +98,7 @@ cargo test --locked -p pdfcraft-cli --test it ai_
 cargo test --locked -p pdfcraft-platform --lib ai::tests
 cargo test --locked -p pdfcraft-platform --lib ai_chat::tests
 cargo test --locked -p pdfcraft-ui-egui --lib ai_
+cargo test --locked -p pdfcraft-ui-egui --test it ai_
 ```
 
 The tests cover provider activation and reload, Chat Completions and Responses, model discovery,

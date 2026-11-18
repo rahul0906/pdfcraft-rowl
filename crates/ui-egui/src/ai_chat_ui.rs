@@ -7,12 +7,12 @@ use std::sync::{
 };
 
 use pdfcraft_engine::{
-    DocId, Document, ai_ask,
+    DocId, Document, Session, ai_ask,
     ai_summary::{self, SummarySource},
 };
 use pdfcraft_platform::{
     ai,
-    ai_chat::{self, Citation, History, Task, Turn},
+    ai_chat::{self, Citation, CitationLocation, History, SourceInfo, Task, Turn},
 };
 
 use crate::ai_ui::{Job, poll, start};
@@ -20,7 +20,8 @@ use crate::{PdfCraftApp, RightPanel, theme};
 
 pub(crate) type Chats = HashMap<DocId, Chat>;
 
-type Answer = (Option<Arc<ai_ask::Index>>, Turn);
+type CachedIndex = (String, Arc<ai_ask::Index>);
+type Answer = (Option<CachedIndex>, Turn);
 
 const TRANSLATION_LANGUAGES: &[&str] = &[
     "Arabic",
@@ -49,12 +50,15 @@ pub(crate) struct Chat {
     question: String,
     task: Task,
     ask_pages: (usize, usize),
+    ask_documents: Option<Vec<(DocId, (usize, usize))>>,
+    selection: Option<(ai_ask::Selection, ai_ask::Stamp)>,
     summary_pages: (usize, usize),
     translation_pages: (usize, usize),
     language: Option<&'static str>,
     pending: Option<String>,
-    index: Option<((usize, usize), Arc<ai_ask::Index>)>,
+    index: Option<CachedIndex>,
     job: Option<Job<Answer>>,
+    job_sources: Vec<ai_ask::Stamp>,
     stop: Arc<AtomicBool>,
     error: Option<String>,
     destination: Result<ai::Profile, String>,
@@ -90,12 +94,15 @@ impl Chat {
             question: String::new(),
             task: Task::Ask,
             ask_pages: (1, doc.info.pages.len()),
+            ask_documents: None,
+            selection: None,
             summary_pages: (1, doc.info.pages.len().min(ai_summary::MAX_PAGES)),
             translation_pages: (current_page, current_page),
             language: None,
             pending: None,
             index: None,
             job: None,
+            job_sources: Vec::new(),
             stop: Arc::default(),
             error,
             destination: provider(),
@@ -136,13 +143,14 @@ impl Chat {
     fn poll_answer(&mut self) {
         if let Some(result) = poll(&mut self.job) {
             self.pending = None;
+            self.job_sources.clear();
             if self.stop.load(Ordering::Relaxed) {
                 return;
             }
             match result {
                 Ok((index, turn)) => {
                     if let Some(index) = index {
-                        self.index = Some((turn.scope, index));
+                        self.index = Some(index);
                     }
                     if turn.task == Task::Ask {
                         self.question.clear();
@@ -162,43 +170,33 @@ impl Chat {
         doc.edit_generation() == self.generation && doc.path == self.path
     }
 
-    fn send(&mut self, doc: &Document, ctx: &egui::Context) -> Result<(), String> {
+    fn send(&mut self, doc: &Document, session: &Session, ctx: &egui::Context) -> Result<(), String> {
         let latest = provider()?;
         let shown = self.destination.as_ref().map_err(Clone::clone)?;
         if latest.endpoint()? != shown.endpoint()? || latest.model != shown.model || latest.name != shown.name {
             self.destination = Ok(latest);
             return Err("The active provider changed. Review the new destination and send again.".into());
         }
+        if self.task == Task::Ask {
+            return self.send_ask(doc, session, latest, ctx);
+        }
         let task = self.task;
         let scope = *self.pages_mut();
         let source = match task {
-            Task::Ask => ai_ask::source(doc, scope.0, scope.1)?,
+            Task::Ask => return Err("Choose an AI action.".into()),
             Task::Summarize => SummarySource::new(doc, scope.0, scope.1)?,
             Task::Translate => SummarySource::for_translation(doc, scope.0, scope.1)?,
         };
         let language = self.language;
         let page_range = format!("{}–{}", scope.0, scope.1);
         let question = match task {
-            Task::Ask => {
-                let question = self.question.trim();
-                if question.is_empty() || question.len() > ai_ask::MAX_QUESTION_BYTES {
-                    return Err("Enter a question of 1–4096 bytes.".into());
-                }
-                question.to_owned()
-            }
+            Task::Ask => return Err("Choose an AI action.".into()),
             Task::Summarize => crate::i18n::fmt(tl!("Summarize pages {pages}"), &[("pages", &page_range)]),
             Task::Translate => {
                 let target = language.ok_or("Choose a target language.")?;
                 crate::i18n::fmt(tl!("Translate pages {pages} to {language}"), &[("pages", &page_range), ("language", tl!(target))])
             }
         };
-        let cached = self.index.as_ref().filter(|(range, _)| *range == scope).map(|(_, index)| index.clone());
-        let mut turns: Vec<_> = if task == Task::Ask {
-            self.turns.iter().rev().filter(|turn| turn.task == Task::Ask && turn.scope == scope).take(4).cloned().collect()
-        } else {
-            Vec::new()
-        };
-        turns.reverse();
         self.stop = Arc::default();
         let stop = self.stop.clone();
         let prompt = question.clone();
@@ -207,21 +205,6 @@ impl Chat {
                 if stop.load(Ordering::Relaxed) { Err("Request stopped.".to_owned()) } else { Ok(()) }
             };
             check_stop()?;
-            if task == Task::Ask {
-                let index = match cached {
-                    Some(index) => index,
-                    None => Arc::new(ai_ask::Index::build(source, || stop.load(Ordering::Relaxed))?),
-                };
-                let sources = index
-                    .search(&question, turns.last().map(|turn| turn.question.as_str()))
-                    .into_iter()
-                    .map(|passage| Citation { page: passage.page, excerpt: passage.text.clone() })
-                    .collect();
-                check_stop()?;
-                let mut turn = ai_chat::ask(&latest, &question, &turns, sources)?;
-                turn.scope = scope;
-                return Ok((Some(index), turn));
-            }
             let answer = if task == Task::Summarize {
                 let text = source.extract()?;
                 check_stop()?;
@@ -231,8 +214,90 @@ impl Chat {
                 check_stop()?;
                 ai::translate(&latest, language.ok_or("Choose a target language.")?, &text)?
             };
-            Ok((None, Turn { task, question, answer, citations: Vec::new(), scope }))
+            Ok((None, Turn { task, question, answer, citations: Vec::new(), scope, ask_scope: None }))
         })?);
+        self.pending = Some(prompt);
+        Ok(())
+    }
+
+    fn send_ask(&mut self, doc: &Document, session: &Session, profile: ai::Profile, ctx: &egui::Context) -> Result<(), String> {
+        let question = self.question.trim();
+        if question.is_empty() || question.len() > ai_ask::MAX_QUESTION_BYTES {
+            return Err("Enter a question of 1–4096 bytes.".into());
+        }
+        let selected = self.selection.is_some();
+        let current_scope = (!selected && self.ask_documents.is_none()).then_some(self.ask_pages);
+        let input = if let Some((selection, stamp)) = &self.selection {
+            if !stamp.matches(doc) {
+                return Err("The text selection changed. Select the text again or choose PDFs.".into());
+            }
+            vec![(doc, ai_ask::selected_source(doc, *selection)?)]
+        } else if let Some(documents) = &self.ask_documents {
+            documents
+                .iter()
+                .map(|&(id, (first, last))| {
+                    let doc = session.get(id).ok_or("A selected PDF was closed. Choose the PDFs again.")?;
+                    Ok((doc, ai_ask::source(doc, first, last)?))
+                })
+                .collect::<Result<_, String>>()?
+        } else {
+            vec![(doc, ai_ask::source(doc, self.ask_pages.0, self.ask_pages.1)?)]
+        };
+        let job_sources = input.iter().map(|(doc, _)| ai_ask::stamp(doc)).collect();
+        let (documents, sources): (Vec<_>, Vec<_>) =
+            input.into_iter().map(|(doc, source)| ((ai_ask::document_label(doc, session), doc.path.clone()), source)).unzip();
+        ai_ask::validate_scope(&sources)?;
+        let cached = self.index.clone();
+        let history = if selected { Vec::new() } else { self.turns.clone() };
+        self.stop = Arc::default();
+        let stop = self.stop.clone();
+        let question = question.to_owned();
+        let prompt = question.clone();
+        self.job = Some(start(ctx, move || {
+            let evidence: Vec<_> = sources
+                .iter()
+                .zip(documents)
+                .map(|(source, (name, path))| {
+                    (SourceInfo::new(source.doc.0, name, path.as_deref(), source.revision_parts()), source.pages(), source.selection())
+                })
+                .collect();
+            let scope_key = ai_chat::revision_id(format!("{evidence:?}").as_bytes());
+            let mut turns: Vec<_> = history
+                .into_iter()
+                .rev()
+                .filter(|turn| {
+                    turn.task == Task::Ask
+                        && (turn.ask_scope.as_ref() == Some(&scope_key) || (turn.ask_scope.is_none() && current_scope == Some(turn.scope)))
+                })
+                .take(4)
+                .collect();
+            turns.reverse();
+            let index = match cached {
+                Some((key, index)) if key == scope_key => index,
+                _ => Arc::new(ai_ask::Index::build(sources, || stop.load(Ordering::Relaxed))?),
+            };
+            let hits: Vec<_> =
+                if selected { index.selection().collect() } else { index.search(&question, turns.last().map(|turn| turn.question.as_str())) };
+            let citations = hits
+                .into_iter()
+                .filter_map(|passage| {
+                    let (source, _, _) = evidence.iter().find(|(source, _, _)| source.doc == passage.doc.0)?;
+                    Some(Citation {
+                        page: passage.page,
+                        excerpt: passage.text.clone(),
+                        location: Some(CitationLocation { source: source.clone(), rects: passage.rects.clone() }),
+                    })
+                })
+                .collect();
+            if stop.load(Ordering::Relaxed) {
+                return Err("Request stopped.".into());
+            }
+            let mut turn = ai_chat::ask(&profile, &question, &turns, citations)?;
+            turn.scope = current_scope.unwrap_or_default();
+            turn.ask_scope = Some(scope_key.clone());
+            Ok((Some((scope_key, index)), turn))
+        })?);
+        self.job_sources = job_sources;
         self.pending = Some(prompt);
         Ok(())
     }
@@ -249,7 +314,67 @@ pub(crate) fn open(app: &mut PdfCraftApp, task: Task) {
     let chat = chat_for(&mut app.ai_chats, doc, current_page);
     chat.task = task;
     chat.destination = provider();
+    app.ai_chat_anchor = None;
     app.choose_right_panel(Some(RightPanel::AiChat));
+}
+
+pub(crate) fn open_selection(app: &mut PdfCraftApp, view: usize, selection: ai_ask::Selection) {
+    let Some(view_id) = app.views.get(view).map(|view| view.id) else { return };
+    let Some(doc) = app.session.get(view_id) else { return };
+    let chat = chat_for(&mut app.ai_chats, doc, app.views.get(view).map_or(1, |view| view.current.saturating_add(1)));
+    if chat.job.is_some() {
+        chat.error = Some("Stop the current request before asking about a selection.".into());
+    } else {
+        chat.task = Task::Ask;
+        chat.destination = provider();
+        chat.selection = Some((selection, ai_ask::stamp(doc)));
+        chat.archive = None;
+        chat.error = None;
+    }
+    app.active = Some(view);
+    app.ai_chat_anchor = None;
+    app.choose_right_panel(Some(RightPanel::AiChat));
+}
+
+pub(crate) fn reveal_citation(app: &mut PdfCraftApp, owner: DocId, page: usize, location: CitationLocation) {
+    let target = app.views.iter().enumerate().find_map(|(index, view)| {
+        if view.id.0 != location.source.doc {
+            return None;
+        }
+        let doc = app.session.get(view.id)?;
+        let page = page.checked_sub(1)?;
+        let info = doc.info.pages.get(page)?;
+        if !doc.allows_copying() || !location.source.matches(doc.path.as_deref(), ai_ask::revision_parts(doc)) {
+            return None;
+        }
+        let rects: Vec<_> = location
+            .rects
+            .iter()
+            .take(1200)
+            .filter_map(|&[x0, y0, x1, y1]| {
+                if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
+                    return None;
+                }
+                let [a, b] = info.view_to_user(x0, y0);
+                let [c, d] = info.view_to_user(x1, y1);
+                Some([a.min(c), b.min(d), a.max(c), b.max(d)])
+            })
+            .collect();
+        Some((index, page, rects, &doc.info))
+    });
+    let Some((index, page, rects, info)) = target else {
+        app.notify_tr("The cited PDF is no longer open at that revision.");
+        return;
+    };
+    let Some(view) = app.views.get_mut(index) else { return };
+    if let Some(rect) = rects.first().copied() {
+        view.reveal_rect(page, rect, info);
+        view.citation_flash = Some((page, rects, 0.0));
+    } else {
+        view.go_to_page(page);
+    }
+    app.active = Some(index);
+    app.ai_chat_anchor = Some(owner);
 }
 
 fn chat_for<'a>(chats: &'a mut Chats, doc: &Document, current_page: usize) -> &'a mut Chat {
@@ -263,6 +388,10 @@ fn chat_for<'a>(chats: &'a mut Chats, doc: &Document, current_page: usize) -> &'
 pub(crate) fn refresh(chats: &mut Chats, session: &pdfcraft_engine::Session) {
     chats.retain(|id, chat| session.get(*id).is_some_and(|doc| chat.matches(doc) && doc.allows_copying()));
     for chat in chats.values_mut() {
+        if chat.job_sources.iter().any(|stamp| !session.get(stamp.doc).is_some_and(|doc| stamp.matches(doc))) {
+            chat.stop.store(true, Ordering::Relaxed);
+            chat.error = Some("A source PDF changed or closed. Send the question again after reviewing the sources.".into());
+        }
         chat.poll_answer();
     }
 }
@@ -271,6 +400,7 @@ pub(crate) fn panel(
     ui: &mut egui::Ui,
     t: &theme::Tokens,
     doc: &Document,
+    session: &Session,
     current_page: usize,
     chats: &mut Chats,
     nav: &mut Option<crate::panels::Nav>,
@@ -287,7 +417,7 @@ pub(crate) fn panel(
                 .resizable(false)
                 .show_separator_line(false)
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| composer(ui, chat, doc, t))
+                .show(ui, |ui| composer(ui, chat, doc, session, t))
                 .inner
         } else {
             false
@@ -379,7 +509,75 @@ fn header(ui: &mut egui::Ui, chat: &mut Chat, t: &theme::Tokens) {
     ui.separator();
 }
 
-fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, t: &theme::Tokens) -> bool {
+fn ask_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session) {
+    let choose = ui.button(tl!("Choose PDFs…"));
+    egui::Popup::menu(&choose).show(|ui| {
+        if ui.button(tl!("Use current PDF")).clicked() {
+            chat.selection = None;
+            chat.ask_documents = None;
+            ui.close();
+        }
+        let mut chosen = chat.ask_documents.clone().unwrap_or_else(|| vec![(doc.id, chat.ask_pages)]);
+        let mut changed = false;
+        egui::ScrollArea::vertical().id_salt("ai-open-pdfs").max_height(230.0).show(ui, |ui| {
+            for open in session.docs() {
+                let previous = chosen.iter().position(|(id, _)| *id == open.id);
+                let mut checked = previous.is_some();
+                let enabled = open.allows_copying() && (checked || chosen.len() < ai_ask::MAX_DOCUMENTS);
+                let name = ai_ask::document_label(open, session);
+                if ui.add_enabled(enabled || checked, crate::widgets::checkbox(&mut checked, &name)).changed() {
+                    if checked {
+                        chosen.push((open.id, (1, open.info.pages.len())));
+                    } else if let Some(index) = previous {
+                        chosen.remove(index);
+                    }
+                    changed = true;
+                }
+                if let Some((_, (first, last))) = chosen.iter_mut().find(|(id, _)| *id == open.id) {
+                    let count = open.info.pages.len().max(1);
+                    ui.push_id(open.id.0, |ui| {
+                        ui.horizontal(|ui| {
+                            let label = ui.label(tl!("From page"));
+                            changed |= ui.add(egui::DragValue::new(first).range(1..=count)).labelled_by(label.id).changed();
+                            let label = ui.label(tl!("To page"));
+                            changed |= ui.add(egui::DragValue::new(last).range(1..=count)).labelled_by(label.id).changed();
+                        });
+                    });
+                }
+            }
+        });
+        if chosen.iter().any(|(id, _)| session.get(*id).is_none()) && ui.button(tl!("Remove closed PDFs")).clicked() {
+            chosen.retain(|(id, _)| session.get(*id).is_some());
+            changed = true;
+        }
+        if changed {
+            chat.selection = None;
+            chat.ask_documents = Some(chosen);
+            chat.error = None;
+        }
+    });
+    if chat.selection.is_some() {
+        let name = ai_ask::document_label(doc, session);
+        ui.label(crate::i18n::fmt(tl!("Selected text in {name}"), &[("name", &name)]));
+    } else if let Some(chosen) = &chat.ask_documents {
+        if chosen.is_empty() {
+            ui.label(tl!("Choose at least one PDF."));
+        }
+        egui::ScrollArea::vertical().id_salt("ai-included-pdfs").max_height(72.0).auto_shrink([false, true]).show(ui, |ui| {
+            for (id, (first, last)) in chosen {
+                if let Some(open) = session.get(*id) {
+                    ui.label(format!("{} · {first}–{last}", ai_ask::document_label(open, session)));
+                } else {
+                    ui.label(tl!("A selected PDF was closed."));
+                }
+            }
+        });
+    } else {
+        ui.label(ai_ask::document_label(doc, session));
+    }
+}
+
+fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session, t: &theme::Tokens) -> bool {
     let can_edit = chat.job.is_none() && !chat.confirm_new;
     let frame = egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(10).inner_margin(9.0);
     ui.add_space(6.0);
@@ -388,19 +586,24 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, t: &theme::Token
             ui.set_width(ui.available_width().max(1.0));
             let mut send_key = false;
             ui.add_enabled_ui(can_edit, |ui| {
-                let count = doc.info.pages.len().max(1);
-                let (first, last) = chat.pages_mut();
-                ui.horizontal_wrapped(|ui| {
-                    let label = ui.label(tl!("From page"));
-                    ui.add(egui::DragValue::new(first).range(1..=count)).labelled_by(label.id);
-                    let label = ui.label(tl!("To page"));
-                    ui.add(egui::DragValue::new(last).range(1..=count)).labelled_by(label.id);
-                });
+                if chat.task == Task::Ask {
+                    ask_scope(ui, chat, doc, session);
+                }
+                if chat.task != Task::Ask || (chat.selection.is_none() && chat.ask_documents.is_none()) {
+                    let count = doc.info.pages.len().max(1);
+                    let (first, last) = chat.pages_mut();
+                    ui.horizontal_wrapped(|ui| {
+                        let label = ui.label(tl!("From page"));
+                        ui.add(egui::DragValue::new(first).range(1..=count)).labelled_by(label.id);
+                        let label = ui.label(tl!("To page"));
+                        ui.add(egui::DragValue::new(last).range(1..=count)).labelled_by(label.id);
+                    });
+                }
                 match chat.task {
                     Task::Ask => {
                         let label = ui.label(tl!("Question"));
                         let field = egui::TextEdit::multiline(&mut chat.question)
-                            .hint_text(tl!("Ask about this PDF…"))
+                            .hint_text(tl!("Ask about the selected sources…"))
                             .desired_rows(2)
                             .desired_width(ui.available_width())
                             .char_limit(ai_ask::MAX_QUESTION_BYTES);
@@ -453,7 +656,10 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, t: &theme::Token
                 } else {
                     let ready = can_edit
                         && match chat.task {
-                            Task::Ask => !chat.question.trim().is_empty(),
+                            Task::Ask => {
+                                !chat.question.trim().is_empty()
+                                    && (chat.selection.is_some() || chat.ask_documents.as_ref().is_none_or(|docs| !docs.is_empty()))
+                            }
                             Task::Translate => chat.language.is_some(),
                             Task::Summarize => true,
                         };
@@ -468,13 +674,14 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, t: &theme::Token
                         egui::Button::new(label)
                     };
                     if ui.add_enabled(ready, button).clicked() || (ready && send_key) {
-                        chat.error = chat.send(doc, ui.ctx()).err();
+                        chat.error = chat.send(doc, session, ui.ctx()).err();
                     }
                 }
             });
             let disclosure = match &chat.destination {
                 Err(error) => error.as_str(),
-                Ok(_) if chat.task == Task::Ask => tl!("Sends your question, matching excerpts, and recent turns."),
+                Ok(_) if chat.task == Task::Ask && chat.selection.is_some() => tl!("Sends your question and the selected text."),
+                Ok(_) if chat.task == Task::Ask => tl!("Sends your question, matching excerpts, and recent turns for this scope."),
                 Ok(_) => tl!("Sends text from the selected pages."),
             };
             ui.label(egui::RichText::new(disclosure).small().color(t.text_muted));
@@ -508,13 +715,18 @@ fn conversation(ui: &mut egui::Ui, chat: &Chat, doc: &Document, nav: &mut Option
                 let copy_id = ui.make_persistent_id(("copy-answer", &chat.revision, &chat.archive, index, &turn.question));
                 copy_answer(ui, copy_id, &turn.answer, t);
                 for cite in &turn.citations {
-                    let label = format!("{} {}", tl!("Page"), cite.page);
-                    if chat.archive.is_none() && (1..=doc.info.pages.len()).contains(&cite.page) {
+                    let page = format!("{} {}", tl!("Page"), cite.page);
+                    if let Some(location) = &cite.location {
+                        let label = format!("{} · {page}", location.source.document);
                         if ui.link(label).on_hover_text(&cite.excerpt).clicked() {
+                            *nav = Some(crate::panels::Nav::AiCitation(doc.id, cite.page, location.clone()));
+                        }
+                    } else if chat.archive.is_none() && (1..=doc.info.pages.len()).contains(&cite.page) {
+                        if ui.link(page).on_hover_text(&cite.excerpt).clicked() {
                             *nav = Some(crate::panels::Nav::Page(cite.page - 1));
                         }
                     } else {
-                        ui.label(label).on_hover_text(&cite.excerpt);
+                        ui.label(page).on_hover_text(&cite.excerpt);
                     }
                 }
             });
@@ -629,8 +841,9 @@ mod tests {
                 task: Task::Ask,
                 question: "What is on the second page?".into(),
                 answer: "Two.".into(),
-                citations: vec![Citation { page: 2, excerpt: "Two".into() }],
+                citations: vec![Citation { page: 2, excerpt: "Two".into(), location: None }],
                 scope: (1, 2),
+                ask_scope: None,
             });
             app.ai_chats.insert(id, chat);
             app
@@ -715,6 +928,7 @@ mod tests {
                     answer: "Late answer.".into(),
                     citations: Vec::new(),
                     scope: (1, 1),
+                    ask_scope: None,
                 },
             )))
             .unwrap_or_else(|_| panic!("Chat dropped its pending worker"));
@@ -724,5 +938,66 @@ mod tests {
         assert!(chat.job.is_none() && chat.pending.is_none());
         assert!(chat.turns.is_empty());
         assert_eq!(chat.question, "What is on page one?");
+    }
+
+    #[test]
+    fn ask_picks_open_pdfs_and_highlights_the_cited_same_named_tab() {
+        use egui::accesskit::Role;
+
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            for (name, text) in [("paper.pdf", "Sample size was 30."), ("paper.pdf", "Sample size was 60."), ("excluded.pdf", "Sample size was 99.")]
+            {
+                let bytes = app.session.create_from_text("Test", text).unwrap();
+                app.open_bytes(name, None, bytes.as_ref().clone()).unwrap();
+            }
+            app.active = Some(0);
+            app.run_command("ai.ask");
+            app
+        });
+        h.run_steps(5);
+        let owner = h.state().views[0].id;
+        let target = h.state().views[1].id;
+        let target_label = format!("paper.pdf #{}", target.0);
+        h.get_by_role_and_label(Role::Button, "Choose PDFs…").click();
+        h.run_steps(4);
+        h.get_by_label(&target_label).click();
+        h.run_steps(4);
+        assert_eq!(h.state().ai_chats[&owner].ask_documents, Some(vec![(owner, (1, 1)), (target, (1, 1))]));
+        h.key_press(egui::Key::Escape);
+        h.run_steps(4);
+
+        let doc = h.state().session.get(target).unwrap();
+        let index = ai_ask::Index::build(vec![ai_ask::source(doc, 1, 1).unwrap()], || false).unwrap();
+        let hit = index.search("sample size", None)[0];
+        let info = &doc.info.pages[0];
+        let [x0, y0, x1, y1] = hit.rects[0];
+        let [a, b] = info.view_to_user(x0, y0);
+        let [c, d] = info.view_to_user(x1, y1);
+        let expected = [a.min(c), b.min(d), a.max(c), b.max(d)];
+        let source = SourceInfo::new(target.0, target_label.clone(), doc.path.as_deref(), ai_ask::revision_parts(doc));
+        let turn = Turn {
+            task: Task::Ask,
+            question: "What was the sample size?".into(),
+            answer: "The second paper reports 60.".into(),
+            citations: vec![Citation {
+                page: hit.page,
+                excerpt: hit.text.clone(),
+                location: Some(CitationLocation { source, rects: hit.rects.clone() }),
+            }],
+            scope: (0, 0),
+            ask_scope: None,
+        };
+        h.state_mut().ai_chats.get_mut(&owner).unwrap().turns.push(turn);
+        h.run_steps(4);
+        let link = format!("{target_label} · Page 1");
+        h.get_by_role_and_label(Role::Link, &link).click();
+        h.run_steps(4);
+        assert_eq!(h.state().active, Some(1));
+        assert_eq!(h.state().ai_chat_anchor, Some(owner));
+        assert_eq!(h.state().views[1].citation_flash.as_ref().unwrap().1, [expected]);
+        assert!(h.state().views[0].citation_flash.is_none() && h.state().views[2].citation_flash.is_none());
+        h.get_by_role_and_label(Role::Link, &link);
     }
 }
