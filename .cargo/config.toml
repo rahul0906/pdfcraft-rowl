@@ -13,3 +13,7 @@ rustflags = ["-C", "target-feature=+simd128"]
 # which it can only do once `main` runs.
 [env]
 AWS_LC_SYS_CFLAGS = "-DBORINGSSL_NO_STATIC_INITIALIZER"
+# Use the optional, gitignored shared-font checkout for local builds too, so Hindi
+# translations use Noto Sans Devanagari instead of a platform-dependent system face.
+# Cargo resolves this relative to the repository root; an explicit environment value wins.
+CRAFT_FONTS_DIR = { value = "craft-fonts", relative = true }

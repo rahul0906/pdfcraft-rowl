@@ -213,6 +213,36 @@ fn devanagari_ui_text_uses_craft_fonts() {
     assert!(layout_widths(&mut fonts, DEVANAGARI).iter().all(|w| w.is_finite() && *w > 0.0));
 }
 
+/// Opt-in acceptance check for the local font setup. Unlike optional-input diagnostics,
+/// this must fail when Hindi translation results would fall back to an installed face.
+#[test]
+#[ignore = "requires the craft-fonts build input; see README.md"]
+fn hindi_translation_prefers_bundled_noto() {
+    let noto = pdfcraft_fonts::ui_devanagari_fonts()
+        .into_iter()
+        .find(|face| face.family == "Noto Sans Devanagari" && face.style == "Regular")
+        .expect("bundle Noto Sans Devanagari Regular from craft-fonts before checking Hindi translations");
+    let name = noto.name();
+    let defs = theme::installed_font_definitions(theme::CjkPreference::Default);
+    for (family, stack) in &defs.families {
+        let bundled = stack.iter().position(|face| face == &name).expect("Noto must be in every interface family");
+        for system in [theme::SYSTEM_DEVANAGARI_FALLBACK, theme::SYSTEM_FALLBACK] {
+            if let Some(installed) = stack.iter().position(|face| face == system) {
+                assert!(bundled < installed, "{family:?}: Hindi must prefer Noto over {system}: {stack:?}");
+            }
+        }
+    }
+    let mut fonts = Fonts::new(TextOptions::default(), defs);
+    for id in families() {
+        assert!(fonts.has_glyphs(&id, "हिंदी अनुवाद: कि की कु कू फ़ा क्ष त्र ज्ञ श्र 2026"), "{id:?}");
+    }
+    let joined = layout_widths(&mut fonts, "क्ष");
+    let apart = layout_widths(&mut fonts, "क्\u{200c}ष");
+    for (joined, apart) in joined.iter().zip(&apart) {
+        assert!(joined.is_finite() && *joined > 0.0 && joined < apart, "क्ष must form a conjunct: {joined} vs {apart}");
+    }
+}
+
 /// On a machine with an installed Telugu font, the installed definitions include it and Telugu
 /// text has glyphs, so the language's own name in Preferences is not boxes (#1531). macOS always
 /// ships Kohinoor Telugu, so there the test never skips.
