@@ -24,8 +24,8 @@ pdfcraft-platform = { workspace = true }
 base64 = "0.23"
 
 [dev-dependencies]
-# Decodes `render` output in tests/it/owner_password.rs; already a dependency of the engine.
-png = "0.18"
+# Decodes `render` output in tests/it/owner_password.rs.
+craft-image-codecs = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 tempfile = "3.27"

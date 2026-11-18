@@ -1,6 +1,7 @@
 //! pdfcraft-platform — L7 operating-system services shared by the desktop app (`ui-egui`) and the
 //! automation tools (`automation`), which sit on the same layer and can't depend on each other,
-//! and by the two executables (`owner_only`, for the `--control` file).
+//! and by the two executables (`owner_only`, for the `--control` file; `crypto_env`, before
+//! anything uses aws-lc).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -8,6 +9,7 @@
 pub mod ai;
 #[cfg(target_os = "macos")]
 pub mod ai_chat;
+pub mod crypto_env;
 pub mod desktop_theme;
 pub mod owner_only;
 pub mod staging;
