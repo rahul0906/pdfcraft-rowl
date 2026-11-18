@@ -284,23 +284,31 @@ mod page_argument_tests {
 #[cfg(target_os = "macos")]
 #[test]
 fn ai_summary_previews_then_sends_only_confirmed_pages() {
-    ai_provider_mock(false, false);
+    ai_provider_mock(false, "ai_summarize");
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn ai_summary_supports_responses_endpoint_and_output() {
-    ai_provider_mock(true, false);
+    ai_provider_mock(true, "ai_summarize");
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn ai_ask_retrieves_follow_up_context_and_validates_citations() {
-    ai_provider_mock(true, true);
+    ai_provider_mock(true, "ai_ask");
 }
 
 #[cfg(target_os = "macos")]
-fn ai_provider_mock(responses: bool, ask: bool) {
+#[test]
+fn ai_translate_sends_the_target_language_and_only_confirmed_pages() {
+    ai_provider_mock(true, "ai_translate");
+}
+
+#[cfg(target_os = "macos")]
+fn ai_provider_mock(responses: bool, tool: &str) {
+    let ask = tool == "ai_ask";
+    let translate = tool == "ai_translate";
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;
@@ -334,7 +342,7 @@ fn ai_provider_mock(responses: bool, ask: bool) {
         if mark {
             steps.push(json!({"tool":"redact_mark","args":{"doc":1,"page":2,"whole_pages":true}}));
         }
-        steps.push(json!({"tool":if ask { "ai_ask" } else { "ai_summarize" },"args":args}));
+        steps.push(json!({"tool":tool,"args":args}));
         let steps = json!(steps);
         std::fs::write(&script, steps.to_string()).unwrap();
         let output = Command::new(BIN)
@@ -350,6 +358,8 @@ fn ai_provider_mock(responses: bool, ask: bool) {
     };
     let args = if ask {
         json!({"doc":1, "question":"Are there exceptions?", "previous_question":"What is the refund policy?", "previous_answer":"The policy mentions refunds."})
+    } else if translate {
+        json!({"doc":1,"first_page":2,"last_page":2,"target_language":"Español"})
     } else {
         json!({"doc":1,"first_page":2,"last_page":2})
     };
@@ -363,6 +373,9 @@ fn ai_provider_mock(responses: bool, ask: bool) {
     let preview = &preview["steps"][1]["result"][0];
     assert_eq!(preview["sent"], false);
     assert_eq!(preview["endpoint"], endpoint);
+    if translate {
+        assert_eq!(preview["target_language"], "Español");
+    }
 
     let mut confirm = args;
     confirm["user_confirmed"] = json!(true);
@@ -434,6 +447,11 @@ fn ai_provider_mock(responses: bool, ask: bool) {
                 assert_eq!(input["recent_turns"][0]["question"], "What is the refund policy?");
                 assert_eq!(input["sources"], json!([{"source":1,"page":2,"text":"Refund"}]));
                 r#"{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The refund passage applies [S1]. [S99]"}]}]}"#
+            } else if translate {
+                let input: Value = serde_json::from_str(payload["input"].as_str().unwrap()).unwrap();
+                assert_eq!(input, json!({"target_language":"Español", "text":"[Page 2]\nPage 2\n\n"}));
+                assert!(payload["instructions"].as_str().unwrap().contains("Translate"));
+                r#"{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Página 2"}]}]}"#
             } else if responses {
                 assert_eq!(payload["input"], "[Page 2]\nPage 2\n\n");
                 assert_eq!(payload["store"], false);
@@ -459,6 +477,8 @@ fn ai_provider_mock(responses: bool, ask: bool) {
         if ask {
             assert_eq!(result["answer"].as_str().unwrap().trim(), "The refund passage applies [Page 2].");
             assert_eq!(result["citations"], json!([{"page":2,"excerpt":"Refund"}]));
+        } else if translate {
+            assert_eq!(result["translation"], "Página 2");
         } else {
             assert_eq!(result["summary"], "A summary of page two.");
         }

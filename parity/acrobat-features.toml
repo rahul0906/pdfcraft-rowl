@@ -7472,11 +7472,11 @@ title = "Translate documents"
 area = "J"
 tier = "P3"
 milestone = "M13"
-status = "planned"
-commands = []
-tools = []
-evidence = []
-notes = "through an optional AiProvider; never Adobe's cloud"
+status = "partial"
+commands = ["ai.translate"]
+tools = ["ai_translate"]
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_translate_sends_the_target_language_and_only_confirmed_pages"]
+notes = "macOS translation of selected page text through the configured provider; result is copyable text."
 
 [[feature]]
 id = "create.cloud-office-conversion"

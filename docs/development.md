@@ -28,7 +28,7 @@ the low-disk artifacts, run `cargo clean --profile low-disk`.
 Building PdfCraft requires Rust 1.95 or later: the UI crate and its `egui` and `craft-ui`
 dependencies need it, and the workspace `rust-version` states the same minimum.
 
-## Local AI summaries on macOS
+## AI Assistant on macOS
 
 Open **Preferences → AI Providers**, add a profile with a base URL and model ID, then select
 **Use provider**. The OpenAI preset uses `https://api.openai.com/v1`. Choose **Chat Completions**
@@ -37,34 +37,28 @@ or **Responses** according to the provider's documentation. For Meta's `muse-emb
 such as `http://127.0.0.1:1234/v1` and leave the API key empty if the server supports that.
 When supplied, the key is saved in macOS Keychain. **Test connection** uses sample text.
 
-Open a PDF and choose **AI assistant → Summarize**. Review the destination and page range,
-then choose **Send and summarize**. The range is limited to 50 pages and 64 KiB of extracted
-text. Scanned pages need an existing OCR text layer. The result stays in the summary dialog
-until you copy it or close the dialog.
+Open a PDF and choose **AI Assistant → Ask about this document**, **Summarize**, or
+**Translate**. All three open the same sidebar. Review the provider and page range in the
+composer at the bottom. Results appear above it, with a **Copy** button for each answer.
 
-CLI and MCP callers can use `ai_summarize` with `doc`, `first_page`, and `last_page`.
-The first call previews the endpoint and model. After the user confirms, repeat the call
-with `user_confirmed: true`, `confirmed_endpoint`, and `confirmed_model` from the preview.
+- **Ask** searches the selected pages locally and sends matching excerpts, your question,
+  and up to four recent Ask turns from the same range. Click a citation to navigate to its
+  page, or hover to read the excerpt. Retrieval covers up to 1,000 pages and 4 MiB of text.
+- **Summarize** sends text from the selected pages, up to 50 pages and 64 KiB per request.
+- **Translate** starts with the current page when opening the conversation. Choose a
+  target language from the dropdown, then select up to 10 pages or 12 KiB of text.
+  The result is copyable text in the conversation. Scanned pages need an OCR text layer.
 
-## Ask about this document on macOS
+In **Chat options**, enable **Save chats on this Mac** for a named document to save up to
+24 turns per revision under the private `AI Chats` folder in PdfCraft's application support
+directory. **New chat** clears the current conversation after confirmation. You can view
+and delete older saved revisions in **Chat options**. **Stop** cancels local work before
+sending where possible and discards the result of a request already sent.
 
-Open **AI Assistant → Ask about this document** to chat beside the PDF. Choose a page range,
-review the provider shown in the pane, and click **Ask**. PdfCraft searches the selected
-pages locally and sends ranked excerpts, the question, and up to four recent turns from
-the same range. Click a source page to navigate there, or hover to read the excerpt.
-Keyword retrieval needs matches in the document text, so rephrase a question with words
-used by the document if no sources are found. The index covers up to 1,000 pages and
-4 MiB of extracted text per range.
-
-**Save chats on this Mac** is off until enabled for a named document. It saves up to
-24 turns per revision in the private `AI Chats` directory under PdfCraft’s application
-support folder. **New chat** clears the current conversation. Older saved revisions can
-be viewed and deleted from the conversation picker. Requests use the current PDF
-revision and its matching chat. **Stop** cancels local work before sending where possible
-and discards the result of a request already sent.
-
-CLI and MCP expose `ai_ask` with the same preview and destination confirmation as
-`ai_summarize`. For a follow-up, pass `previous_question` and optionally `previous_answer`.
+CLI and MCP expose `ai_ask`, `ai_summarize`, and `ai_translate`. The first call previews the
+endpoint and model. After the user confirms, repeat with `user_confirmed: true`,
+`confirmed_endpoint`, and `confirmed_model`. Summaries and translations require
+`first_page` and `last_page`. Translation also requires `target_language`.
 
 ## Annotation tool pin
 

@@ -803,8 +803,6 @@ pub struct PdfCraftApp {
     ai_settings: ai_ui::Settings,
     #[cfg(target_os = "macos")]
     ai_chats: ai_chat_ui::Chats,
-    #[cfg(target_os = "macos")]
-    ai_summary: Option<ai_ui::Summary>,
     pub printer_marks_draft: printer_marks_ui::PrinterMarksDraft,
     pub convert_colours_draft: convert_colours_ui::ConvertColoursDraft,
     pub hairlines_draft: hairlines_ui::HairlinesDraft,

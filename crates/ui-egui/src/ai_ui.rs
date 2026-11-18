@@ -1,13 +1,10 @@
-//! macOS provider preferences and the read-only PDF summary dialog.
+//! macOS provider preferences and background AI jobs.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use egui::{Context, Ui};
-use pdfcraft_engine::{DocId, ai_summary::SummarySource};
 use pdfcraft_platform::ai::{self, ApiFormat, Profile, Providers};
 use zeroize::Zeroizing;
-
-use crate::{Dialog, PdfCraftApp, theme};
 
 pub(crate) type Job<T> = Receiver<Result<T, String>>;
 
@@ -250,94 +247,4 @@ impl Settings {
             Err(error) => self.status = Some(error),
         }
     }
-}
-
-pub(crate) struct Summary {
-    doc: DocId,
-    profile: Profile,
-    first: usize,
-    last: usize,
-    job: Option<Job<String>>,
-    answer: Option<Result<String, String>>,
-}
-
-pub(crate) fn open(app: &mut PdfCraftApp) {
-    let Some((_, id)) = app.active_ids() else { return };
-    let Some(doc) = app.session.get(id) else { return };
-    let profile = ai::load().and_then(|profiles| profiles.enabled_profile(None).cloned());
-    match profile {
-        Ok(profile) => {
-            app.ai_summary = Some(Summary {
-                doc: id,
-                profile,
-                first: 1,
-                last: doc.info.pages.len().min(pdfcraft_engine::ai_summary::MAX_PAGES),
-                job: None,
-                answer: None,
-            });
-            app.dialog = Some(Dialog::AiSummary);
-        }
-        Err(error) => {
-            app.notify(error);
-            app.dialog = Some(Dialog::Preferences);
-        }
-    }
-}
-
-pub(crate) fn summary_body(ui: &mut Ui, app: &mut PdfCraftApp) -> bool {
-    let Some(summary) = app.ai_summary.as_mut() else { return true };
-    let Some(doc) = app.session.get(summary.doc) else { return true };
-    let pages = doc.info.pages.len().max(1);
-    if let Some(answer) = poll(&mut summary.job) {
-        summary.answer = Some(answer);
-    }
-    ui.label(egui::RichText::new(tl!("Summarize")).font(theme::semibold(18.0)));
-    ui.label(&doc.name);
-    ui.label(format!("{} · {}", summary.profile.name, summary.profile.model));
-    ui.label(&summary.profile.base_url);
-    ui.label(tl!("Send extracted text from the selected pages to this provider. Provider charges may apply."));
-    let mut send = false;
-    ui.add_enabled_ui(summary.job.is_none(), |ui| {
-        ui.horizontal(|ui| {
-            let from = ui.label(tl!("First page"));
-            ui.add(egui::DragValue::new(&mut summary.first).range(1..=pages)).labelled_by(from.id);
-            let to = ui.label(tl!("Last page"));
-            ui.add(egui::DragValue::new(&mut summary.last).range(1..=pages)).labelled_by(to.id);
-        });
-        send = ui.button(tl!("Send and summarize")).clicked();
-    });
-    if send {
-        summary.answer = None;
-        let profile = summary.profile.clone();
-        let result = SummarySource::new(doc, summary.first, summary.last).and_then(|source| {
-            start(ui.ctx(), move || {
-                let text = source.extract()?;
-                ai::summarize(&profile, &text)
-            })
-        });
-        match result {
-            Ok(job) => summary.job = Some(job),
-            Err(error) => summary.answer = Some(Err(error)),
-        }
-    }
-    if summary.job.is_some() {
-        ui.spinner();
-        ui.label(tl!("Summarizing…"));
-    }
-    match &summary.answer {
-        Some(Ok(answer)) => {
-            let max_height = (ui.ctx().content_rect().height() * 0.45).max(80.0);
-            egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
-                ui.label(answer);
-            });
-            if ui.button(tl!("Copy summary")).clicked() {
-                ui.ctx().copy_text(answer.clone());
-            }
-        }
-        Some(Err(error)) => {
-            ui.label(error);
-        }
-        None => {}
-    }
-    ui.button(tl!("Close")).clicked()
 }

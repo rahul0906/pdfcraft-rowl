@@ -78,7 +78,7 @@ const PANELS: &[(RightPanel, &str, &str)] = &[
     (RightPanel::Search, "search", "Search"),
     (RightPanel::Compare, "compare", "Compare"),
     #[cfg(target_os = "macos")]
-    (RightPanel::AiChat, "ai-chat", "Ask about this document"),
+    (RightPanel::AiChat, "ai-chat", "AI assistant"),
 ];
 
 /// The English titles of the menus and submenus, for the bar's mnemonics in languages whose

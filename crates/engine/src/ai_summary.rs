@@ -1,4 +1,4 @@
-//! A read-only, bounded snapshot of PDF text selected for summarization.
+//! A read-only, bounded snapshot of PDF text selected for an AI request.
 
 use std::fmt::Write as _;
 
@@ -7,7 +7,9 @@ use pdfcraft_render::{PageRenderer, RenderRequest, RequestKind};
 use crate::Document;
 
 pub const MAX_PAGES: usize = 50;
+pub const MAX_TRANSLATION_PAGES: usize = 10;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
+const MAX_TRANSLATION_BYTES: usize = 12 * 1024;
 const MAX_ANNOTATIONS_PER_PAGE: usize = 10_000;
 
 pub struct SummarySource {
@@ -36,9 +38,21 @@ impl SummarySource {
     }
 
     pub fn extract(self) -> Result<String, String> {
+        self.extract_bounded(MAX_TEXT_BYTES)
+    }
+
+    pub fn for_translation(doc: &Document, first: usize, last: usize) -> Result<Self, String> {
+        Self::for_range(doc, first, last, MAX_TRANSLATION_PAGES)
+    }
+
+    pub fn extract_for_translation(self) -> Result<String, String> {
+        self.extract_bounded(MAX_TRANSLATION_BYTES)
+    }
+
+    fn extract_bounded(self, max_bytes: usize) -> Result<String, String> {
         let mut out = String::new();
         self.visit_text(|page, text| {
-            if out.len().saturating_add(text.len()).saturating_add(32) > MAX_TEXT_BYTES {
+            if out.len().saturating_add(text.len()).saturating_add(32) > max_bytes {
                 return Err("This range has too much text. Select fewer pages.".into());
             }
             let _ = writeln!(out, "[Page {page}]\n{text}\n");

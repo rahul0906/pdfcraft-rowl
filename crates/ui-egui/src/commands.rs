@@ -237,9 +237,15 @@ impl PdfCraftApp {
             }
             "app.preferences" => self.dialog = Some(Dialog::Preferences),
             #[cfg(target_os = "macos")]
-            "ai.summary" => crate::ai_ui::open(self),
-            #[cfg(target_os = "macos")]
-            "ai.ask" => self.choose_right_panel(Some(crate::RightPanel::AiChat)),
+            "ai.ask" | "ai.summary" | "ai.translate" => {
+                use pdfcraft_platform::ai_chat::Task;
+                let task = match id {
+                    "ai.summary" => Task::Summarize,
+                    "ai.translate" => Task::Translate,
+                    _ => Task::Ask,
+                };
+                crate::ai_chat_ui::open(self, task);
+            }
             "protect.remove_hidden" => self.open_remove_hidden(),
             "print.dialog" => self.open_print(),
             "optimize.advanced" => self.dialog = Some(Dialog::Optimize),

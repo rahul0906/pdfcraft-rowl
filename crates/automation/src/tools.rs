@@ -267,6 +267,13 @@ pub fn tools() -> Vec<ToolDef> {
                 "first_page": { "type": "integer", "minimum": 1 }, "last_page": { "type": "integer", "minimum": 1 },
                 "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" }
             }), &["doc", "first_page", "last_page"])),
+        #[cfg(target_os = "macos")]
+        t("ai_translate", "Translate PDF text", "Translate the selected page text into a target language. First preview with user_confirmed omitted and ask the user before sending. After consent, repeat with user_confirmed true and the previewed endpoint and model. Returns text and may incur provider charges.")
+            .cmd("ai.translate")
+            .with(schema(json!({ "doc": doc(), "provider": { "type": "string", "description": "Saved profile name (default: the active provider)." },
+                "target_language": { "type": "string", "minLength": 1 }, "first_page": { "type": "integer", "minimum": 1 }, "last_page": { "type": "integer", "minimum": 1 },
+                "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" }
+            }), &["doc", "first_page", "last_page", "target_language"])),
         t("text_word_count", "Word count", "Count Unicode words and characters on selected pages (default all), with totals and per-page counts. Table/code exclusions use PDF structure tags, not visual guesses; unclassified text is retained. Image exclusion removes Figure-tagged and invisible/OCR text. Does not run OCR. Copy permission is required. Fails rather than returning a partial total when a page cannot be read.")
             .ro()
             .cmd("file.word_count")

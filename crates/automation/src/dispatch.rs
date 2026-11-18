@@ -72,7 +72,9 @@ impl Automation {
             "model_render" => return self.model_render(&a),
             "comment_image_preview" => return self.comment_image_preview(&a),
             #[cfg(target_os = "macos")]
-            "ai_summarize" => self.ai_summarize(&a)?,
+            "ai_summarize" => self.ai_transform(&a, false)?,
+            #[cfg(target_os = "macos")]
+            "ai_translate" => self.ai_transform(&a, true)?,
             #[cfg(target_os = "macos")]
             "ai_ask" => self.ai_ask(&a)?,
             "text_extract" => self.text_extract(&a)?,

@@ -362,8 +362,6 @@ impl PdfCraftApp {
             ai_settings: Default::default(),
             #[cfg(target_os = "macos")]
             ai_chats: Default::default(),
-            #[cfg(target_os = "macos")]
-            ai_summary: None,
             printer_marks_draft: Default::default(),
             convert_colours_draft: Default::default(),
             hairlines_draft: Default::default(),

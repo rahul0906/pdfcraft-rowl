@@ -187,8 +187,6 @@ pub enum Dialog {
     DocumentJs,
     /// Preferences.
     Preferences,
-    #[cfg(target_os = "macos")]
-    AiSummary,
     /// Compare files: choose the older version.
     CompareFiles,
     /// Action Wizard.

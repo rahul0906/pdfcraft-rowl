@@ -1,7 +1,7 @@
 use pdfcraft_engine::{ai_ask, ai_summary::SummarySource};
 use pdfcraft_platform::{
     ai,
-    ai_chat::{self, Citation, Turn},
+    ai_chat::{self, Citation, Task, Turn},
 };
 use serde_json::{Value, json};
 
@@ -10,11 +10,13 @@ use crate::error::{Result, ToolError, failed};
 use crate::json::Args;
 
 impl Automation {
-    pub(crate) fn ai_summarize(&mut self, a: &Args) -> Result<Value> {
+    pub(crate) fn ai_transform(&mut self, a: &Args, translate: bool) -> Result<Value> {
+        let language = if translate { Some(ai::translation_language(a.str("target_language")?).map_err(ToolError::InvalidArgs)?) } else { None };
         let doc = self.doc_to_copy(a)?;
         let page = |key| usize::try_from(a.int(key)?).map_err(|_| ToolError::InvalidArgs("Page numbers must be positive.".into()));
         let (first, last) = (page("first_page")?, page("last_page")?);
-        let source = SummarySource::new(doc, first, last).map_err(failed)?;
+        let source =
+            if translate { SummarySource::for_translation(doc, first, last) } else { SummarySource::new(doc, first, last) }.map_err(failed)?;
         let providers = ai::load().map_err(failed)?;
         let profile = providers.enabled_profile(a.opt_str("provider")?).map_err(failed)?;
         let endpoint = profile.endpoint().map_err(failed)?;
@@ -22,13 +24,20 @@ impl Automation {
             "provider": profile.name, "endpoint": endpoint.as_str(), "model": profile.model,
             "first_page": first, "last_page": last, "sent": false
         });
+        if let Some(language) = language {
+            result["target_language"] = json!(language);
+        }
         if !confirmed(a, endpoint.as_str(), &profile.model)? {
             return Ok(result);
         }
-        let text = source.extract().map_err(failed)?;
-        let summary = ai::summarize(profile, &text).map_err(failed)?;
+        if let Some(language) = language {
+            let text = source.extract_for_translation().map_err(failed)?;
+            result["translation"] = json!(ai::translate(profile, language, &text).map_err(failed)?);
+        } else {
+            let text = source.extract().map_err(failed)?;
+            result["summary"] = json!(ai::summarize(profile, &text).map_err(failed)?);
+        }
         result["sent"] = json!(true);
-        result["summary"] = json!(summary);
         Ok(result)
     }
 }
@@ -74,7 +83,7 @@ impl Automation {
         let history = if previous.is_empty() {
             Vec::new()
         } else {
-            vec![Turn { question: previous.into(), answer: answer.into(), citations: Vec::new(), scope: (first, last) }]
+            vec![Turn { task: Task::Ask, question: previous.into(), answer: answer.into(), citations: Vec::new(), scope: (first, last) }]
         };
         let turn = ai_chat::ask(profile, question, &history, sources).map_err(failed)?;
         result["sent"] = json!(sent);

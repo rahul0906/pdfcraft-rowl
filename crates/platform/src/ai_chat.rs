@@ -20,8 +20,19 @@ pub struct Citation {
     pub excerpt: String,
 }
 
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Task {
+    #[default]
+    Ask,
+    Summarize,
+    Translate,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Turn {
+    #[serde(default)]
+    pub task: Task,
     pub question: String,
     pub answer: String,
     pub citations: Vec<Citation>,
@@ -35,6 +46,7 @@ pub fn ask(profile: &Profile, question: &str, history: &[Turn], sources: Vec<Cit
     }
     if sources.is_empty() {
         return Ok(Turn {
+            task: Task::Ask,
             question: question.into(),
             answer: "I couldn’t find relevant text in the selected pages.".into(),
             citations: Vec::new(),
@@ -89,7 +101,7 @@ pub fn ask(profile: &Profile, question: &str, history: &[Turn], sources: Vec<Cit
     if citations.is_empty() {
         display = "I couldn’t verify an answer from the selected pages.".into();
     }
-    Ok(Turn { question: question.into(), answer: display, citations, scope: (0, 0) })
+    Ok(Turn { task: Task::Ask, question: question.into(), answer: display, citations, scope: (0, 0) })
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -188,7 +200,7 @@ mod tests {
         let path = dir.path().join("chat.json");
         let first = revision_id(b"original");
         let edited = revision_id(b"updated");
-        let turn = Turn { question: "Where?".into(), answer: "Here.".into(), citations: Vec::new(), scope: (1, 3) };
+        let turn = Turn { task: Task::Ask, question: "Where?".into(), answer: "Here.".into(), citations: Vec::new(), scope: (1, 3) };
         assert!(!read(&path).unwrap().enabled);
         save_at(&path, true, Some((&first, &[turn]))).unwrap();
         let reopened = read(&path).unwrap();

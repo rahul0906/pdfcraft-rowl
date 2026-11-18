@@ -546,6 +546,9 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
                 item("Ask about this document", "message-circle-reply", "ai.ask", Ready),
                 #[cfg(not(target_os = "macos"))]
                 item("Ask about this document", "message-circle-reply", "ai.ask", Provider),
+                #[cfg(target_os = "macos")]
+                item("Translate", "languages", "ai.translate", Ready),
+                #[cfg(not(target_os = "macos"))]
                 item("Translate", "languages", "ai.translate", Provider),
             ],
         }],
