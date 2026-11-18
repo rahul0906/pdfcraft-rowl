@@ -1,5 +1,5 @@
 use base64::Engine as _;
-use pdfcraft_engine::{ai_ask, ai_ocr, ai_summary::SummarySource};
+use pdfcraft_engine::{DocId, ai_ask, ai_compare, ai_ocr, ai_summary::SummarySource};
 use pdfcraft_platform::{
     ai,
     ai_chat::{self, Citation, CitationLocation, SourceInfo, Task, Turn},
@@ -23,6 +23,60 @@ impl Automation {
             ai::Profile::llama_cpp("llama.cpp".into(), base_url.unwrap_or(ai::LLAMA_CPP_URL).into(), String::new())
         };
         Ok(json!({ "models": profile.llama_models(None).map_err(failed)? }))
+    }
+
+    pub(crate) fn ai_compare(&self, a: &Args) -> Result<Value> {
+        let new = self.doc_to_copy(a)?;
+        let old = u64::try_from(a.int("other")?)
+            .ok()
+            .and_then(|id| self.session.get(DocId(id)))
+            .ok_or_else(|| Args::wrong("other", "the ID of an open older PDF"))?;
+        let mut pages = if a.get("pages").is_some() { self.pages(a, "pages")? } else { Vec::new() };
+        pages.sort_unstable();
+        pages.dedup();
+        let snapshot = ai_compare::Snapshot::new(old, new, &pages).map_err(failed)?;
+        let info = |doc: &pdfcraft_engine::Document| {
+            SourceInfo::new(doc.id.0, ai_ask::document_label(doc, &self.session), doc.path.as_deref(), ai_ask::revision_parts(doc))
+        };
+        let (old_info, new_info) = (info(old), info(new));
+        let providers = ai::load().map_err(failed)?;
+        let profile = providers.enabled_profile(a.opt_str("provider")?).map_err(failed)?;
+        let endpoint = profile.endpoint().map_err(failed)?;
+        let mut result = json!({
+            "provider": profile.name, "endpoint": endpoint.as_str(), "model": profile.model, "sent": false,
+            "older": old_info, "newer": new_info, "pages": pages.iter().map(|page| page + 1).collect::<Vec<_>>(),
+        });
+        result["scope_token"] = json!(ai_chat::revision_id(result.to_string().as_bytes()));
+        if !confirmed(a, endpoint.as_str(), &profile.model)? {
+            return Ok(result);
+        }
+        confirm_source_scope(a, &result)?;
+        let evidence = snapshot.extract(|| false).map_err(failed)?;
+        result["identical_text"] = json!(evidence.changes.is_empty());
+        let order = if evidence.changes.is_empty() {
+            Vec::new()
+        } else {
+            result["sent"] = json!(true);
+            match ai::rank_changes(profile, &evidence.prompt, evidence.changes.len()) {
+                Ok(order) => order,
+                Err(error) => {
+                    result["notice"] = json!(error);
+                    Vec::new()
+                }
+            }
+        };
+        result["used_ai"] = json!(!order.is_empty());
+        result["changes"] = json!(
+            evidence
+                .ranked(&order)
+                .iter()
+                .map(|change| json!({
+                    "id": change.id, "kind": change.kind.label().to_lowercase(), "explanation": change.description(),
+                    "old": compare_excerpt(change.old.as_ref(), &old_info), "new": compare_excerpt(change.new.as_ref(), &new_info),
+                }))
+                .collect::<Vec<_>>()
+        );
+        Ok(result)
     }
 
     pub(crate) fn ai_transform(&mut self, a: &Args, translate: bool) -> Result<Value> {
@@ -59,7 +113,7 @@ impl Automation {
         }
         if let Some(language) = language {
             if let Some(options) = &ocr {
-                confirm_scan_scope(a, &result)?;
+                confirm_source_scope(a, &result)?;
                 let scan = source.translation_with_ocr(options, rect, || false).map_err(failed)?;
                 result["source_passages"] =
                     json!(scan.passages.iter().map(|(page, text, rects)| json!({"page":page,"text":text,"rects":rects})).collect::<Vec<_>>());
@@ -76,6 +130,20 @@ impl Automation {
         result["sent"] = json!(true);
         Ok(result)
     }
+}
+
+fn compare_excerpt(excerpt: Option<&ai_compare::Excerpt>, source: &SourceInfo) -> Option<Value> {
+    let excerpt = excerpt?;
+    let citations: Vec<_> = excerpt
+        .passages
+        .iter()
+        .map(|p| Citation {
+            page: p.page,
+            excerpt: p.text.clone(),
+            location: Some(CitationLocation { source: source.clone(), rects: p.rects.clone() }),
+        })
+        .collect();
+    Some(json!({"text": excerpt.text, "before": excerpt.before, "after": excerpt.after, "citations": citations}))
 }
 
 fn scan_options(a: &Args) -> Result<Option<ai_ocr::Options>> {
@@ -111,7 +179,7 @@ fn add_scan_preview(result: &mut Value, options: &ai_ocr::Options, selection: Op
     result["scope_token"] = json!(ai_chat::revision_id(fingerprint.to_string().as_bytes()));
 }
 
-fn confirm_scan_scope(a: &Args, result: &Value) -> Result<()> {
+fn confirm_source_scope(a: &Args, result: &Value) -> Result<()> {
     if a.opt_str("confirmed_scope")? != result["scope_token"].as_str() {
         return Err(failed("Confirm the scope token from the preview. Preview again if the selected PDFs, pages or revision changed."));
     }
@@ -227,7 +295,7 @@ impl Automation {
             return Ok(result);
         }
         if detailed {
-            confirm_scan_scope(a, &result)?;
+            confirm_source_scope(a, &result)?;
         }
         if let (true, Some(ai_ask::Selection::Rect { page, rect }), Some(options)) = (vision, selected, &ocr) {
             if !profile.is_llama_cpp() {

@@ -79,6 +79,8 @@ impl Automation {
             "ai_translate" => self.ai_transform(&a, true)?,
             #[cfg(target_os = "macos")]
             "ai_ask" => self.ai_ask(&a)?,
+            #[cfg(target_os = "macos")]
+            "ai_compare" => self.ai_compare(&a)?,
             "text_extract" => self.text_extract(&a)?,
             "text_word_count" => self.text_word_count(&a)?,
             "text_find" => self.text_find(&a)?,

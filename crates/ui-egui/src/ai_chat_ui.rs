@@ -684,25 +684,34 @@ fn scan_controls(ui: &mut egui::Ui, chat: &mut Chat) {
         }
     }
     let language_name = ai_ocr::LANGUAGES.iter().find(|(code, _)| *code == chat.ocr_language).map_or(chat.ocr_language, |(_, name)| *name);
-    let label = ui.label(tl!("OCR source language"));
     ui.horizontal_wrapped(|ui| {
-        craft_ui::ComboBox::from_id_salt("ai-ocr-language")
-            .selected_text(tl!(language_name))
-            .show_ui(ui, |ui| {
-                for &(code, name) in ai_ocr::LANGUAGES {
-                    if ui.selectable_value(&mut chat.ocr_language, code, tl!(name)).clicked() {
-                        ui.close();
+        ui.vertical(|ui| {
+            let label = ui.label(tl!("OCR source language"));
+            craft_ui::ComboBox::from_id_salt("ai-ocr-language")
+                .selected_text(tl!(language_name))
+                .show_ui(ui, |ui| {
+                    for &(code, name) in ai_ocr::LANGUAGES {
+                        if ui.selectable_value(&mut chat.ocr_language, code, tl!(name)).clicked() {
+                            ui.close();
+                        }
                     }
-                }
-            })
-            .response
-            .labelled_by(label.id);
-        craft_ui::ComboBox::from_id_salt("ai-ocr-engine").selected_text(tl!(chat.ocr_engine.name())).show_ui(ui, |ui| {
-            for engine in [EngineChoice::Auto, EngineChoice::Ocrs, EngineChoice::Tesseract] {
-                if ui.selectable_value(&mut chat.ocr_engine, engine, tl!(engine.name())).clicked() {
-                    ui.close();
-                }
-            }
+                })
+                .response
+                .labelled_by(label.id);
+        });
+        ui.vertical(|ui| {
+            let label = ui.label(tl!("OCR engine"));
+            craft_ui::ComboBox::from_id_salt("ai-ocr-engine")
+                .selected_text(tl!(chat.ocr_engine.name()))
+                .show_ui(ui, |ui| {
+                    for engine in [EngineChoice::Auto, EngineChoice::Ocrs, EngineChoice::Tesseract] {
+                        if ui.selectable_value(&mut chat.ocr_engine, engine, tl!(engine.name())).clicked() {
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .labelled_by(label.id);
         });
     });
     if chat.figure && chat.task == Task::Ask && chat.destination.as_ref().is_ok_and(ai::Profile::is_llama_cpp) {
@@ -1073,7 +1082,8 @@ mod tests {
         });
         h.run_steps(4);
         h.get_by_label("Selected area in figure.pdf");
-        h.get_by_label("OCR source language");
+        h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "OCR source language");
+        h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "OCR engine");
         h.get_by_label("Include image for local vision").click();
         h.run_steps(4);
         h.get_by_label("Sends the selected image and any OCR labels to the local model.");

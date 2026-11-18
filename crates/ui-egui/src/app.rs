@@ -598,7 +598,10 @@ impl eframe::App for PdfCraftApp {
 impl PdfCraftApp {
     fn logic_unguarded(&mut self, ctx: &egui::Context) {
         #[cfg(target_os = "macos")]
-        ai_chat_ui::refresh(&mut self.ai_chats, &self.session);
+        {
+            ai_chat_ui::refresh(&mut self.ai_chats, &self.session);
+            compare_ui::refresh(&mut self.compare, &self.session);
+        }
         #[cfg(test)]
         self.injected_panic(crate::frame_guard::FramePart::Logic);
         self.ctx = Some(ctx.clone());

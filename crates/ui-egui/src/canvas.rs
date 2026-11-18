@@ -3254,6 +3254,10 @@ fn fits_height(r: Rect, view_height: f32, pixels_per_point: f32) -> bool {
 /// scroll area with this frame's zoom, scrolling, tool input, overlays (form fields, comments,
 /// signature badges and sign tabs) and render requests.
 pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
+    document_area_with_quick_bar(app, index, ui, true);
+}
+
+pub(crate) fn document_area_with_quick_bar(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, show_quick_bar: bool) {
     let t = Tokens::get(ui.ctx());
     let can_paste_key = egui::Id::unique("can-paste-image");
     let can_paste_image = if ui.input(|i| i.pointer.secondary_pressed()) {
@@ -3674,7 +3678,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         generation,
         avail,
     };
-    apply_frame_requests(app, index, ui, requests);
+    apply_frame_requests(app, index, ui, requests, show_quick_bar);
 }
 
 /// What the frame's input asked the app to do, once the document is no longer borrowed.
@@ -3707,7 +3711,7 @@ struct FrameRequests {
 
 /// Opens the dialogs and runs the app commands the frame asked for.
 #[allow(clippy::cognitive_complexity)]
-fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, requests: FrameRequests) {
+fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, requests: FrameRequests, show_quick_bar: bool) {
     let FrameRequests {
         open_props,
         field_props,
@@ -3956,7 +3960,7 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
     // Read mode hides the tools (#2646), and full screen is the page and nothing else (#1459);
     // the quick tools come back with the window.
     // A document that hides the toolbars (`HideToolbar`) hides this one too.
-    if !app.hotbar_hidden() && !app.views.get(index).is_some_and(|v| v.interface.hidden.toolbar) {
+    if show_quick_bar && !app.hotbar_hidden() && !app.views.get(index).is_some_and(|v| v.interface.hidden.toolbar) {
         // The page nearest the left edge, whose margin the bar sits in.
         let page_left = app.views[index].screen_rects.iter().map(|(_, r)| r.left()).reduce(f32::min);
         quick_bar(app, avail, page_left, ui);

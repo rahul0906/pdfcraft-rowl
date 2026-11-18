@@ -1542,6 +1542,14 @@ pub fn tools() -> Vec<ToolDef> {
             .ro()
             .cmd("doc.compare")
             .with(schema(json!({ "doc": doc(), "other": { "type": "integer", "description": "The older document (from doc_open)." }, "limit": { "type": "integer", "minimum": 1, "description": "List at most this many changes (default 500)." }, "visual": { "type": "boolean", "description": "Also compare how pages look (page n with page n): regions that differ visually." } }), &["doc", "other"])),
+        #[cfg(target_os = "macos")]
+        t("ai_compare", "Explain what changed between two PDFs", "Compare two open PDF revisions and return verified before-and-after explanations with citations. Pass other for the older PDF and doc for the newer PDF. Preview first, then ask the user to confirm sending changed passages with nearby text to the shown provider to rank them. Repeat with user_confirmed true, the previewed endpoint and model, and scope_token as confirmed_scope.")
+            .cmd("doc.compare")
+            .with(schema(json!({
+                "doc": doc(), "other": doc(), "pages": pages("in the newer PDF (omit for all)"), "provider": {"type":"string"},
+                "user_confirmed": {"type":"boolean"}, "confirmed_endpoint": {"type":"string"}, "confirmed_model": {"type":"string"},
+                "confirmed_scope": {"type":"string"}
+            }), &["doc", "other"])),
         t("doc_compare_report", "Compare report", "Write the compare summary report (a PDF listing every change) to path.")
             .cmd("doc.compare")
             .with(schema(json!({ "doc": doc(), "other": { "type": "integer" }, "path": { "type": "string" } }), &["doc", "other", "path"])),

@@ -46,7 +46,7 @@ fn ai_mcp_lists_the_tools_and_discovers_models_in_compact_mode() {
 
     let full = session(&[], &[request(1, "tools/list", json!({}))]).remove(0);
     let tools = full["result"]["tools"].as_array().unwrap();
-    for name in ["ai_ask", "ai_summarize", "ai_translate", "ai_llama_models"] {
+    for name in ["ai_ask", "ai_summarize", "ai_translate", "ai_llama_models", "ai_compare"] {
         let tool = tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("Missing MCP tool {name}"));
         assert_eq!(tool["annotations"]["openWorldHint"], true, "{name}");
         if name != "ai_llama_models" {

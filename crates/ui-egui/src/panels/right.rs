@@ -37,7 +37,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         let sig_expanded = &mut app.sig_expanded;
         let a11y = &mut app.a11y;
         let tags_state = &mut app.tags_state;
-        let compare = &app.compare;
+        let compare = &mut app.compare;
         let comment_allowed = doc.allows_annotation();
         // A dialog or the palette owns the keyboard: the panel leaves Escape to it.
         let modal = app.dialog.is_some() || app.palette_open;
@@ -318,7 +318,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     RightPanel::Search => crate::search_ui::panel(ui, &t, view, info.pages.len()),
                     #[cfg(target_os = "macos")]
                     RightPanel::AiChat => {}
-                    RightPanel::Compare => compare_action = crate::compare_ui::panel(ui, &t, compare, id),
+                    RightPanel::Compare => compare_action = crate::compare_ui::panel(ui, &t, compare, id, &app.session),
                     RightPanel::Attachments => {
                         let attachable = doc.allows_modification() && doc.read_only_reason.is_none();
                         if attachable {

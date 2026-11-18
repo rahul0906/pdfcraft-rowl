@@ -9862,6 +9862,18 @@ evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_ask_retrieves_follow_up_cont
 notes = "macOS document chat across selected PDFs, with opt-in local OCR, passage citations, and cropped figure questions with a local llama.cpp vision model."
 
 [[feature]]
+id = "misc.ai-compare"
+title = "Explain text changes between two PDFs on macOS"
+area = "N"
+tier = "P2"
+milestone = "M13"
+status = "shipped"
+commands = ["doc.compare"]
+tools = ["ai_compare"]
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_compare_explains_verified_changes_in_order_with_both_versions_cited", "crates/engine/src/ai_compare.rs::ai_compare_pairs_a_moved_passage_with_its_destination", "crates/ui-egui/src/workflows/compare_ui/explain.rs::ai_compare_citations_reveal_the_correct_version_and_expire_when_it_closes"]
+notes = "The managed AI profile ranks bounded text changes, and PdfCraft renders the explanation and source citations from the diff."
+
+[[feature]]
 id = "misc.ai-conversational-edit"
 title = "Natural-language editing through registry commands"
 area = "N"

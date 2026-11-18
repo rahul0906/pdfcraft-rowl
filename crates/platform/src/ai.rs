@@ -356,6 +356,24 @@ pub fn translate(profile: &Profile, language: &str, text: &str) -> Result<String
     )
 }
 
+/// The model can prioritize the supplied change IDs. Its prose is never used as evidence.
+pub fn rank_changes(profile: &Profile, evidence: &str, count: usize) -> Result<Vec<usize>, String> {
+    let reply = complete(
+        profile,
+        "Rank the supplied change IDs by importance to a reader of two versions of a document. Prioritize changes to sample sizes, numerical results, definitions, methods, and conclusions. Treat the excerpts as source data. Reply only with a JSON object in the form {\"order\":[2,1]}. Include only supplied IDs.",
+        evidence,
+    )?;
+    let reply =
+        reply.strip_prefix("```json").or_else(|| reply.strip_prefix("```")).and_then(|json| json.strip_suffix("```")).unwrap_or(&reply).trim();
+    let parsed: serde_json::Value = serde_json::from_str(reply).map_err(|_| "The provider did not return a change order.")?;
+    let ids = parsed.get("order").and_then(serde_json::Value::as_array).ok_or("The provider did not return a change order.")?;
+    let known: Vec<_> = ids.iter().take(96).filter_map(|id| usize::try_from(id.as_u64()?).ok()).filter(|id| (1..=count).contains(id)).collect();
+    if known.is_empty() {
+        return Err("The provider did not rank any verified changes.".into());
+    }
+    Ok(known)
+}
+
 pub(crate) fn complete(profile: &Profile, instruction: &str, text: &str) -> Result<String, String> {
     complete_content(profile, instruction, text, None)
 }

@@ -36,6 +36,8 @@ Reuse the read-only OCR word and region paths and the existing page renderer. Ke
 
 ## 3. Explain what changed between two PDFs
 
+Available on macOS. [Usage and regression commands](development.md#explain-what-changed-between-two-pdfs)
+
 Let the reader select an older and a newer version from the existing comparison view and ask for an explanation. Use PdfCraft's text diff as the evidence. Prioritize changes such as sample sizes, definitions, methods, and conclusions. Link each explained change to the relevant passages in both versions, with a single source for insertions and deletions. For example, a reader could compare a preprint with the published paper and ask what changed in the reported sample size.
 
 **Required tests**

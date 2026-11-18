@@ -106,6 +106,31 @@ It accepts a loopback `base_url` for a keyless server or the name of a saved lla
 `provider` for a server with a Keychain credential. With neither argument it uses
 `http://127.0.0.1:8080/v1`.
 
+### Explain what changed between two PDFs
+
+On macOS, open both versions and select the newer one. Choose **Compare Files**, pick the older
+version, and set the optional page range in the newer PDF. In the Compare sidebar, click
+**Explain what changed**, review the provider, and click **Send and explain**. Click an older or
+newer page link to highlight the matching text in that version. The links for additions and
+deletions appear on the version that contains the passage.
+
+PdfCraft sends the changed words and short excerpts of their surrounding text so the provider can
+prioritize them. PdfCraft builds the explanations and citations directly from the comparison.
+Matching passages that appear as an exact deletion and insertion can be shown as moves. A
+comparison with identical extracted text skips the provider request. Run **Scan & OCR** on
+image-only PDFs before comparing their text. Each request covers up to 48 underlying changes and
+16 KiB of evidence. Each PDF can have up to 250 pages.
+
+In CLI and MCP, use `ai_compare` with `other` for the older open document ID and `doc` for the
+newer ID. Optional `pages` is a list of 1-based pages in the newer PDF. Preview the scope and
+provider, then repeat with `user_confirmed: true`, `confirmed_endpoint`, `confirmed_model`, and the
+previewed `scope_token` as `confirmed_scope`. Results include the older and newer text with page
+citations, and `used_ai` reports whether the provider supplied a usable ranking.
+
+The macOS smoke test used LFM2.5 2.6B Q8_0 through a loopback llama.cpp server with
+`--reasoning-budget 0`. It ranked a sample-size change from 100 to 120, an addition,
+and a deletion in two synthetic PDFs. Both files stayed byte-for-byte unchanged.
+
 ### Check the fork after an upstream sync
 
 From the synced checkout on macOS, run the focused AI regression tests. They use synthetic PDFs,
@@ -113,7 +138,7 @@ temporary preference files, and mock servers on loopback.
 
 ```sh
 cargo test --locked -p pdfcraft-cli --test it ai_
-cargo test --locked -p pdfcraft-engine --lib ai_ocr
+cargo test --locked -p pdfcraft-engine --lib ai_
 cargo test --locked -p pdfcraft-platform --lib ai::tests
 cargo test --locked -p pdfcraft-platform --lib ai_chat::tests
 cargo test --locked -p pdfcraft-ui-egui --lib ai_

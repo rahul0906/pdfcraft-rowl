@@ -3,11 +3,14 @@
 //! offers a report or the differences as comments.
 
 use egui::{Align, Color32, Layout};
-use pdfcraft_engine::DocId;
 use pdfcraft_engine::compare::{Comparison, Kind};
+use pdfcraft_engine::{DocId, Session};
 
 use crate::theme::{self, Tokens};
 use crate::{PdfCraftApp, RightPanel, widgets};
+
+#[cfg(target_os = "macos")]
+mod explain;
 
 /// The last comparison.
 pub struct CompareState {
@@ -30,6 +33,8 @@ pub struct CompareState {
     /// differences (counted, never listed) are shaded (Acrobat's Filter).
     pub show_text: bool,
     pub show_visual: bool,
+    #[cfg(target_os = "macos")]
+    explanation: explain::Explanation,
 }
 
 /// Visual differences are shaded orange.
@@ -42,7 +47,25 @@ pub enum PanelAction {
     Report,
     Clear,
     SideBySide(bool),
-    Show { text: bool, visual: bool },
+    Show {
+        text: bool,
+        visual: bool,
+    },
+    #[cfg(target_os = "macos")]
+    ExplainSettings,
+    #[cfg(target_os = "macos")]
+    ExplainCitation {
+        old: bool,
+        page: usize,
+        rects: Vec<[f32; 4]>,
+    },
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh(state: &mut Option<CompareState>, session: &Session) {
+    if let Some(state) = state {
+        state.explanation.refresh(session);
+    }
 }
 
 pub fn colour(kind: Kind) -> Color32 {
@@ -103,8 +126,8 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
 }
 
 /// The Compare panel.
-pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &Option<CompareState>, id: DocId) -> Option<PanelAction> {
-    let Some(s) = state.as_ref().filter(|s| s.new == id) else {
+pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &mut Option<CompareState>, id: DocId, _session: &Session) -> Option<PanelAction> {
+    let Some(s) = state.as_mut().filter(|s| s.new == id) else {
         ui.label(egui::RichText::new(tl!("Compare this file with an older version: Compare files… in All tools.")).color(t.text_muted));
         return None;
     };
@@ -154,6 +177,12 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &Option<CompareState>,
         }
     });
     ui.separator();
+    #[cfg(target_os = "macos")]
+    if !c.identical()
+        && let Some(explanation_action) = s.explanation.draw(ui, t, _session, &s.pages)
+    {
+        action = Some(explanation_action);
+    }
     for (i, ch) in c.changes.iter().enumerate().filter(|_| s.show_text).take(2000) {
         let text = match ch.kind {
             Kind::Replaced => format!("\"{}\" → \"{}\"", ch.old.text, ch.new.text),
@@ -229,6 +258,8 @@ impl PdfCraftApp {
                     prev_scroll: [egui::Vec2::ZERO; 2],
                     show_text: true,
                     show_visual: true,
+                    #[cfg(target_os = "macos")]
+                    explanation: explain::Explanation::new(&self.session, old, new),
                 });
                 self.shade_compare(i);
                 self.right = Some(RightPanel::Compare);
@@ -248,6 +279,34 @@ impl PdfCraftApp {
         let Some(s) = self.compare.as_mut() else { return };
         let (old, new, pages) = (s.old, s.new, s.pages.clone());
         match a {
+            #[cfg(target_os = "macos")]
+            PanelAction::ExplainSettings => self.dialog = Some(crate::Dialog::Preferences),
+            #[cfg(target_os = "macos")]
+            PanelAction::ExplainCitation { old: older, page, rects } => {
+                if !s.explanation.matches(&self.session) {
+                    return;
+                }
+                let target = if older { old } else { new };
+                let Some(info) = self.session.get(target).map(|doc| &doc.info) else { return };
+                let Some(page_info) = info.pages.get(page) else { return };
+                let Some(view) = self.views.iter_mut().find(|v| v.id == target) else { return };
+                let rects: Vec<_> = rects
+                    .into_iter()
+                    .filter_map(|[x0, y0, x1, y1]| {
+                        let [a, b] = page_info.view_to_user(x0, y0);
+                        let [c, d] = page_info.view_to_user(x1, y1);
+                        [a, b, c, d].iter().all(|v| v.is_finite()).then_some([a.min(c), b.min(d), a.max(c), b.max(d)])
+                    })
+                    .collect();
+                if let Some(rect) = rects.first().copied() {
+                    view.reveal_rect(page, rect, info);
+                    view.citation_flash = Some((page, rects, 0.0));
+                } else {
+                    view.go_to_page(page);
+                }
+                s.side_by_side |= older;
+                s.leader = usize::from(!older);
+            }
             PanelAction::Select(i) => {
                 s.selected = Some(i);
                 let Some(ch) = s.result.changes.get(i) else { return };
@@ -427,7 +486,8 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
         let body = egui::Rect::from_min_max(egui::pos2(r.min.x, r.min.y + caption_h), r.max);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("compare-half", k)));
         child.set_clip_rect(body);
-        crate::canvas::document_area(app, index, &mut child);
+        // The pair shares one quick bar. Drawing it in both halves reuses the same egui IDs.
+        crate::canvas::document_area_with_quick_bar(app, index, &mut child, k == 1);
     }
     // After both drew: the leader's scroll, when it moved, is the follower's next offset.
     let (Some(old), Some(new)) = (find(app, ids[0]), find(app, ids[1])) else { return };

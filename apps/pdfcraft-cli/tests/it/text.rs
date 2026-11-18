@@ -637,6 +637,129 @@ fn ai_figure_sends_only_the_confirmed_crop_to_local_vision() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn ai_compare_explains_verified_changes_in_order_with_both_versions_cited() {
+    use std::net::TcpListener;
+
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let page = |lines: &[&str]| {
+        let mut body = "BT /F1 9 Tf 12 260 Td ".to_owned();
+        for line in lines {
+            use std::fmt::Write as _;
+            write!(body, "({line}) Tj 0 -28 Td ").unwrap();
+        }
+        format!("{body} ET")
+    };
+    let unchanged = page(&["Unrelated appendix stays identical ZXW201."]);
+    let older = page(&[
+        "Sample size was 100 participants.",
+        "Baseline measurements were retained.",
+        "Discard the calibration note.",
+        "Recruitment used a public registry.",
+        "The report was accepted.",
+    ]);
+    let newer = page(&[
+        "Sample size was 120 participants.",
+        "Baseline measurements were retained.",
+        "Recruitment used a public registry.",
+        "A blinded reviewer verified outcomes.",
+        "The report was accepted.",
+    ]);
+    for (name, first) in [("old.pdf", older), ("new.pdf", newer)] {
+        std::fs::write(root.join(name), fixture_streams(vec![first, unchanged.clone()])).unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = write_ai_test_profile(root, &listener);
+    let run = |args: Value| {
+        run_ai_script(
+            root,
+            json!([
+                {"tool":"doc_open","args":{"path":"old.pdf"}},
+                {"tool":"doc_open","args":{"path":"new.pdf"}},
+                {"tool":"ai_compare","args":args}
+            ]),
+        )
+    };
+    let confirm = |mut args: Value| {
+        let (ok, report) = run(args.clone());
+        assert!(ok, "{report}");
+        let preview = &report["steps"][2]["result"][0];
+        assert_eq!(preview["sent"], false);
+        assert!(preview.get("changes").is_none());
+        args["user_confirmed"] = json!(true);
+        args["confirmed_endpoint"] = json!(endpoint);
+        args["confirmed_model"] = json!("mock-model");
+        args["confirmed_scope"] = preview["scope_token"].clone();
+        args
+    };
+    let args = confirm(json!({"doc":2,"other":1,"pages":[1]}));
+    let mut swapped = args.clone();
+    swapped["doc"] = json!(1);
+    swapped["other"] = json!(2);
+    let (ok, report) = run(swapped);
+    assert!(!ok && report["steps"][2]["error"].as_str().unwrap().contains("scope token"), "{report}");
+
+    let (ok, report) = run(confirm(json!({"doc":2,"other":1,"pages":[2]})));
+    assert!(ok, "{report}");
+    let result = &report["steps"][2]["result"][0];
+    assert_eq!(result["sent"], false);
+    assert_eq!(result["identical_text"], true);
+
+    let (ok, report) = run(confirm(json!({"doc":2,"other":2})));
+    assert!(ok, "{report}");
+    let result = &report["steps"][2]["result"][0];
+    assert_eq!(result["sent"], false);
+    assert_eq!(result["identical_text"], true);
+    assert_eq!(result["changes"], json!([]));
+
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let (socket, body) = ai_mock_request(&listener, "POST /v1/chat/completions");
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            let text = payload["messages"][1]["content"].as_str().unwrap();
+            assert!(text.contains("Sample size was") && text.contains("changed text \"100\"") && text.contains("changed text \"120\""), "{text}");
+            assert!(text.contains("Discard the calibration note.") && text.contains("A blinded reviewer verified outcomes."), "{text}");
+            assert!(!text.contains("ZXW201") && !text.contains("old.pdf") && !text.contains("new.pdf"), "{text}");
+            let content = json!({"order":[3,999,1,3], "summary":"The authors recruited 9,000 participants."}).to_string();
+            ai_mock_reply(socket, &json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]}).to_string());
+        });
+        let (ok, report) = run(args);
+        server.join().unwrap();
+        assert!(ok, "{report}");
+        let result = &report["steps"][2]["result"][0];
+        assert_eq!(result["sent"], true);
+        assert_eq!(result["used_ai"], true);
+        assert_eq!(result["identical_text"], false);
+        assert!(!result.to_string().contains("9,000"));
+        let changes = result["changes"].as_array().unwrap();
+        assert_eq!(changes.iter().map(|c| c["id"].as_u64().unwrap()).collect::<Vec<_>>(), [3, 1, 2]);
+        let inserted = &changes[0];
+        assert_eq!(inserted["kind"], "inserted");
+        assert!(inserted["old"].is_null());
+        assert_eq!(inserted["new"]["citations"][0]["location"]["doc"], 2);
+        let changed = &changes[1];
+        assert_eq!(changed["explanation"], "Changed “100” to “120”.");
+        for (key, name, doc, excerpt) in [("old", "old.pdf", 1, "100"), ("new", "new.pdf", 2, "120")] {
+            let cite = &changed[key]["citations"][0];
+            assert_eq!(cite["page"], 1);
+            assert_eq!(cite["excerpt"], excerpt);
+            assert_eq!(cite["location"]["doc"], doc);
+            assert_eq!(cite["location"]["document"], name);
+            assert_eq!(cite["location"]["rects"].as_array().unwrap().len(), 1);
+        }
+        let deleted = &changes[2];
+        assert_eq!(deleted["kind"], "deleted");
+        assert_eq!(deleted["old"]["citations"][0]["location"]["doc"], 1);
+        assert!(deleted["new"].is_null());
+    });
+}
+
+#[cfg(target_os = "macos")]
 fn write_ai_test_profile(root: &std::path::Path, listener: &std::net::TcpListener) -> String {
     let settings = root.join("Library/Application Support/PdfCraft");
     std::fs::create_dir_all(&settings).unwrap();
