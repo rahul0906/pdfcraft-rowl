@@ -10,6 +10,20 @@ use crate::error::{Result, ToolError, failed};
 use crate::json::Args;
 
 impl Automation {
+    pub(crate) fn ai_llama_models(&self, a: &Args) -> Result<Value> {
+        let base_url = a.opt_str("base_url")?;
+        let profile = if let Some(name) = a.opt_str("provider")? {
+            if base_url.is_some() {
+                return Err(ToolError::InvalidArgs("Use either a saved provider or a base URL.".into()));
+            }
+            let providers = ai::load().map_err(failed)?;
+            providers.profiles.into_iter().find(|p| p.name == name).ok_or_else(|| failed("The selected AI provider no longer exists."))?
+        } else {
+            ai::Profile::llama_cpp("llama.cpp".into(), base_url.unwrap_or(ai::LLAMA_CPP_URL).into(), String::new())
+        };
+        Ok(json!({ "models": profile.llama_models(None).map_err(failed)? }))
+    }
+
     pub(crate) fn ai_transform(&mut self, a: &Args, translate: bool) -> Result<Value> {
         let language = if translate { Some(ai::translation_language(a.str("target_language")?).map_err(ToolError::InvalidArgs)?) } else { None };
         let doc = self.doc_to_copy(a)?;

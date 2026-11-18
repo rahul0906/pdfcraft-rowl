@@ -37,6 +37,19 @@ or **Responses** according to the provider's documentation. For Meta's `muse-emb
 such as `http://127.0.0.1:1234/v1` and leave the API key empty if the server supports that.
 When supplied, the key is saved in macOS Keychain. **Test connection** uses sample text.
 
+To use llama.cpp, start `llama-server` with a chat-capable GGUF model. For example, the
+following uses the loopback address and port prefilled by PdfCraft. [llama.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+
+```sh
+llama-server --model /path/to/model.gguf --host 127.0.0.1 --port 8080 --alias local-model --ctx-size 8192
+```
+
+If the server is already running, use its port. In **Preferences → AI Providers**, choose
+**Add llama.cpp**, enter the server's API key if required, and click **Find models**. Choose
+a model or enter its ID directly, then click **Save provider** and **Use provider**.
+Start and stop the server separately.
+For long requests, choose a page range that fits the model's configured context.
+
 Open a PDF and choose **AI Assistant → Ask about this document**, **Summarize**, or
 **Translate**. All three open the same sidebar. Review the provider and page range in the
 composer at the bottom. Results appear above it, with a **Copy** button for each answer.
@@ -59,6 +72,28 @@ CLI and MCP expose `ai_ask`, `ai_summarize`, and `ai_translate`. The first call 
 endpoint and model. After the user confirms, repeat with `user_confirmed: true`,
 `confirmed_endpoint`, and `confirmed_model`. Summaries and translations require
 `first_page` and `last_page`. Translation also requires `target_language`.
+Use `ai_llama_models` to list available models without sending a prompt or any PDF text.
+It accepts a loopback `base_url` for a keyless server or the name of a saved llama.cpp
+`provider` for a server with a Keychain credential. With neither argument it uses
+`http://127.0.0.1:8080/v1`.
+
+### Check the fork after an upstream sync
+
+From the synced checkout on macOS, run the focused AI regression tests. They use synthetic PDFs,
+temporary preference files, and mock servers on loopback.
+
+```sh
+cargo test --locked -p pdfcraft-cli --test it ai_
+cargo test --locked -p pdfcraft-platform --lib ai::tests
+cargo test --locked -p pdfcraft-platform --lib ai_chat::tests
+cargo test --locked -p pdfcraft-ui-egui --lib ai_
+```
+
+The tests cover provider activation and reload, Chat Completions and Responses, model discovery,
+the three document actions, request confirmation, citations, and chat history. The existing
+macOS workspace run also includes them. [Nightly macOS workflow](../.github/workflows/nightly-macos.yml)
+
+**AI Providers → Test connection** checks a live provider with its saved credentials.
 
 ## Annotation tool pin
 

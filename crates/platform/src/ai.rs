@@ -18,6 +18,7 @@ const MAX_KEY_BYTES: usize = 4096;
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
 pub const OPENAI_URL: &str = "https://api.openai.com/v1";
+pub const LLAMA_CPP_URL: &str = "http://127.0.0.1:8080/v1";
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -44,12 +45,22 @@ pub struct Profile {
     #[serde(default)]
     pub api_format: ApiFormat,
     #[serde(default)]
+    llama_cpp: bool,
+    #[serde(default)]
     credential: Option<String>,
 }
 
 impl Profile {
     pub fn new(name: String, base_url: String, model: String, api_format: ApiFormat) -> Self {
-        Self { name, base_url, model, api_format, credential: None }
+        Self { name, base_url, model, api_format, llama_cpp: false, credential: None }
+    }
+
+    pub fn llama_cpp(name: String, base_url: String, model: String) -> Self {
+        Self { llama_cpp: true, ..Self::new(name, base_url, model, ApiFormat::ChatCompletions) }
+    }
+
+    pub fn is_llama_cpp(&self) -> bool {
+        self.llama_cpp
     }
 
     pub fn has_key(&self) -> bool {
@@ -60,29 +71,24 @@ impl Profile {
         self.credential.as_ref().map(|id| format!("{id}:{}", self.base_url))
     }
 
+    fn saved_key(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+        self.account()
+            .map(|account| {
+                get_generic_password(KEYCHAIN_SERVICE, &account)
+                    .map(Zeroizing::new)
+                    .map_err(|e| format!("Could not read the API key from Keychain (OSStatus {}). Replace the key in AI Providers.", e.code()))
+            })
+            .transpose()
+    }
+
     pub fn endpoint(&self) -> Result<Url, String> {
         if self.name.trim().is_empty() || self.name.len() > 128 || self.name.chars().any(char::is_control) {
             return Err("Enter a provider name of 1–128 bytes.".into());
         }
-        if self.model.trim().is_empty() || self.model.len() > 256 || self.model.chars().any(char::is_control) {
+        if !valid_model_id(&self.model) {
             return Err("Enter a model ID of 1–256 bytes.".into());
         }
-        if self.base_url.len() > 2048 {
-            return Err("The base URL is too long.".into());
-        }
-        let mut url = Url::parse(&self.base_url).map_err(|_| "Enter a valid provider base URL.")?;
-        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
-            return Err("The base URL must contain only the server and API path.".into());
-        }
-        let loopback = match url.host() {
-            Some(Host::Domain(host)) => host == "localhost",
-            Some(Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(Host::Ipv6(ip)) => ip.is_loopback(),
-            None => return Err("The base URL needs a server hostname.".into()),
-        };
-        if !(url.scheme() == "https" || (url.scheme() == "http" && loopback)) {
-            return Err("Use HTTPS, or HTTP for a provider on this Mac.".into());
-        }
+        let mut url = if self.llama_cpp { self.llama_base()? } else { provider_url(&self.base_url)? };
         let path = url.path().trim_end_matches('/');
         let suffix = self.api_format.suffix();
         let path = if path.ends_with(suffix) {
@@ -95,6 +101,77 @@ impl Profile {
         url.set_path(&path);
         Ok(url)
     }
+
+    fn llama_base(&self) -> Result<Url, String> {
+        if !self.llama_cpp || self.api_format != ApiFormat::ChatCompletions {
+            return Err("Choose a llama.cpp provider using Chat Completions.".into());
+        }
+        let mut url = provider_url(&self.base_url)?;
+        if !is_loopback(&url) {
+            return Err("Use a loopback address for llama.cpp, such as http://127.0.0.1:8080/v1.".into());
+        }
+        // Resolve localhost here so an OS hosts-file override cannot send document text off-device.
+        if url.host_str() == Some("localhost") {
+            url.set_host(Some("127.0.0.1")).map_err(|_| "Could not set the llama.cpp loopback address.")?;
+        }
+        let path = url.path().trim_end_matches('/');
+        let path = path.strip_suffix(ApiFormat::ChatCompletions.suffix()).unwrap_or(path);
+        let path = if path.is_empty() { "/v1".into() } else { path.to_owned() };
+        url.set_path(&path);
+        Ok(url)
+    }
+
+    /// Discover the server's model IDs without sending a prompt or document data.
+    /// An explicitly supplied key replaces the saved key for this request only.
+    pub fn llama_models(&self, key: Option<&str>) -> Result<Vec<String>, String> {
+        let mut url = self.llama_base()?;
+        let path = format!("{}/models", url.path());
+        url.set_path(&path);
+        let saved = if key.is_none() { self.saved_key()? } else { None };
+        let key = key.filter(|key| !key.is_empty()).map(str::as_bytes).or_else(|| saved.as_deref().map(Vec::as_slice));
+        let reply = request_json(&url, key, None, true)?;
+        let entries = reply.get("data").and_then(serde_json::Value::as_array).ok_or("llama.cpp returned an invalid model list.")?;
+        let mut models = Vec::new();
+        for id in entries.iter().filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str)) {
+            if valid_model_id(id) && !models.iter().any(|model| model == id) {
+                models.push(id.to_owned());
+                if models.len() == 128 {
+                    break;
+                }
+            }
+        }
+        Ok(models)
+    }
+}
+
+fn valid_model_id(id: &str) -> bool {
+    !id.trim().is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(host)) => host == "localhost",
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+fn provider_url(base_url: &str) -> Result<Url, String> {
+    if base_url.len() > 2048 {
+        return Err("The base URL is too long.".into());
+    }
+    let url = Url::parse(base_url).map_err(|_| "Enter a valid provider base URL.")?;
+    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        return Err("The base URL must contain only the server and API path.".into());
+    }
+    if !url.has_host() {
+        return Err("The base URL needs a server hostname.".into());
+    }
+    if !(url.scheme() == "https" || (url.scheme() == "http" && is_loopback(&url))) {
+        return Err("Use HTTPS, or HTTP for a provider on this Mac.".into());
+    }
+    Ok(url)
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -211,9 +288,7 @@ pub fn save(original: Option<&str>, mut profile: Profile, key: Option<&str>) -> 
         }
         Some("") => {}
         Some(key) => {
-            if key.len() > MAX_KEY_BYTES || !key.bytes().all(|b| b.is_ascii_graphic()) {
-                return Err("Enter an API key without spaces or control characters.".into());
-            }
+            validate_key(key.as_bytes())?;
             // A new account leaves the old profile usable if writing the JSON fails.
             let mut random = [0_u8; 16];
             getrandom::fill(&mut random).map_err(|_| "Could not create a Keychain entry ID.")?;
@@ -283,14 +358,7 @@ pub fn translate(profile: &Profile, language: &str, text: &str) -> Result<String
 
 pub(crate) fn complete(profile: &Profile, instruction: &str, text: &str) -> Result<String, String> {
     let url = profile.endpoint()?;
-    let key = profile
-        .account()
-        .map(|account| {
-            get_generic_password(KEYCHAIN_SERVICE, &account)
-                .map(Zeroizing::new)
-                .map_err(|e| format!("Could not read the API key from Keychain (OSStatus {}). Replace the key in AI Providers.", e.code()))
-        })
-        .transpose()?;
+    let key = profile.saved_key()?;
     let body = match profile.api_format {
         ApiFormat::ChatCompletions => serde_json::json!({
             "model": profile.model, "stream": false,
@@ -301,6 +369,21 @@ pub(crate) fn complete(profile: &Profile, instruction: &str, text: &str) -> Resu
         }),
     };
     let body = serde_json::to_vec(&body).map_err(|_| "Could not encode the AI request.")?;
+    let value = request_json(&url, key.as_deref().map(Vec::as_slice), Some(&body), profile.is_llama_cpp())?;
+    match profile.api_format {
+        ApiFormat::ChatCompletions => chat_answer(&value),
+        ApiFormat::Responses => responses_answer(&value),
+    }
+}
+
+fn validate_key(key: &[u8]) -> Result<(), String> {
+    if key.len() > MAX_KEY_BYTES || !key.iter().all(u8::is_ascii_graphic) {
+        return Err("Enter an API key without spaces or control characters.".into());
+    }
+    Ok(())
+}
+
+fn request_json(url: &Url, key: Option<&[u8]>, body: Option<&[u8]>, llama_cpp: bool) -> Result<serde_json::Value, String> {
     let agent = ureq::Agent::config_builder()
         .tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build())
         .proxy(None)
@@ -308,17 +391,26 @@ pub(crate) fn complete(profile: &Profile, instruction: &str, text: &str) -> Resu
         .max_redirects_will_error(false)
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_global(Some(Duration::from_secs(120)))
+        .timeout_global(Some(Duration::from_secs(if body.is_some() { 120 } else { 10 })))
         .build()
         .new_agent();
-    let mut request = agent.post(url.as_str()).header("Content-Type", "application/json");
-    if let Some(key) = key.as_ref() {
+    let mut request = ureq::http::Request::builder().uri(url.as_str());
+    if let Some(key) = key {
+        validate_key(key)?;
         let key = std::str::from_utf8(key).map_err(|_| "The saved API key is invalid. Replace it in AI Providers.")?;
         let value = Zeroizing::new(format!("Bearer {key}"));
-        request = request.header("Authorization", value.as_str());
+        let mut header = ureq::http::HeaderValue::from_str(value.as_str()).map_err(|_| "The API key could not be used in a request.")?;
+        header.set_sensitive(true);
+        request = request.header(ureq::http::header::AUTHORIZATION, header);
     }
-    let mut reply = request.send(body.as_slice()).map_err(|e| match e {
+    let reply = match body {
+        Some(body) => agent.run(request.method("POST").header("Content-Type", "application/json").body(body).map_err(|_| "Invalid AI request.")?),
+        None => agent.run(request.body(()).map_err(|_| "Invalid AI request.")?),
+    };
+    let mut reply = reply.map_err(|e| match e {
+        ureq::Error::Timeout(_) if body.is_none() => "llama.cpp did not return its model list in time. Check the server and try again.".to_owned(),
         ureq::Error::Timeout(_) => "The AI provider timed out. Try a smaller page range or check the connection.".to_owned(),
+        _ if llama_cpp => "Could not reach llama.cpp. Check that llama-server is running and that the base URL matches it.".to_owned(),
         _ => "Could not reach the AI provider. Check the base URL, network connection and server certificate.".to_owned(),
     })?;
     match reply.status().as_u16() {
@@ -329,6 +421,7 @@ pub(crate) fn complete(profile: &Profile, instruction: &str, text: &str) -> Resu
         }
         404 => return Err("The AI endpoint or model was not found. Check the base URL, API format and model ID.".into()),
         429 => return Err("The AI provider rate-limited the request. Check your quota or try again later.".into()),
+        503 if llama_cpp => return Err("llama.cpp is unavailable (HTTP 503). If the server is loading a model, wait and try again.".into()),
         status => return Err(format!("The AI provider returned HTTP {status}. Check the model ID and page range.")),
     }
     let bytes = reply
@@ -337,11 +430,7 @@ pub(crate) fn complete(profile: &Profile, instruction: &str, text: &str) -> Resu
         .limit(MAX_REPLY_BYTES)
         .read_to_vec()
         .map_err(|_| "The AI response was too large, incomplete, or timed out.")?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "The AI provider returned invalid JSON.")?;
-    match profile.api_format {
-        ApiFormat::ChatCompletions => chat_answer(&value),
-        ApiFormat::Responses => responses_answer(&value),
-    }
+    serde_json::from_slice(&bytes).map_err(|_| "The AI provider returned invalid JSON.".into())
 }
 
 fn chat_answer(value: &serde_json::Value) -> Result<String, String> {
@@ -412,5 +501,71 @@ mod tests {
             let profile = Profile::new("Test".into(), url.into(), "model".into(), ApiFormat::Responses);
             assert_eq!(profile.endpoint().unwrap().as_str(), endpoint);
         }
+    }
+
+    #[test]
+    fn llama_cpp_profiles_keep_completions_on_loopback() {
+        let profile = |url: &str| Profile::llama_cpp("llama.cpp".into(), url.into(), "local-model".into());
+        for url in [LLAMA_CPP_URL, "http://localhost:8080/", "http://127.0.0.1:8080/v1/chat/completions"] {
+            assert_eq!(profile(url).endpoint().unwrap().as_str(), "http://127.0.0.1:8080/v1/chat/completions");
+        }
+        assert_eq!(profile("http://[::1]:9931/v1").endpoint().unwrap().as_str(), "http://[::1]:9931/v1/chat/completions");
+        let remote = profile("https://example.com/v1");
+        assert!(remote.endpoint().unwrap_err().contains("loopback"));
+        assert!(remote.llama_models(None).unwrap_err().contains("loopback"));
+        let wrong_format = Profile { api_format: ApiFormat::Responses, ..profile(LLAMA_CPP_URL) };
+        assert!(wrong_format.endpoint().is_err());
+    }
+
+    #[test]
+    fn keyless_profiles_persist_and_require_explicit_activation() {
+        // Run preference mutations in a child so tests never change HOME for other threads.
+        const TEST_HOME: &str = "PDFCRAFT_TEST_AI_PREFERENCE_HOME";
+        let Some(home) = std::env::var_os(TEST_HOME) else {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ai::tests::keyless_profiles_persist_and_require_explicit_activation", "--nocapture"])
+                .env(TEST_HOME, dir.path())
+                .env("HOME", dir.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        };
+        assert_eq!(std::env::home_dir().unwrap(), PathBuf::from(home));
+        assert!(load().unwrap().profiles.is_empty());
+
+        let local = Profile::llama_cpp("Local".into(), "http://localhost:8080/".into(), "local-model".into());
+        let cloud = Profile::new("Cloud".into(), "https://example.invalid/v1/responses".into(), "cloud-model".into(), ApiFormat::Responses);
+        save(None, local, None).unwrap();
+        save(None, cloud, None).unwrap();
+        let stored = load().unwrap();
+        assert!(stored.enabled_profile(Some("Local")).is_err(), "Saving a profile must leave AI off");
+        assert_eq!(stored.profiles.len(), 2);
+
+        select(Some("Local")).unwrap();
+        let stored = load().unwrap();
+        let mut local = stored.enabled_profile(None).unwrap().clone();
+        assert!(local.is_llama_cpp());
+        assert!(!local.has_key());
+        assert_eq!(local.base_url, LLAMA_CPP_URL);
+        let cloud = stored.enabled_profile(Some("Cloud")).unwrap();
+        assert_eq!(cloud.endpoint().unwrap().as_str(), "https://example.invalid/v1/responses");
+
+        local.name = "Renamed local".into();
+        save(Some("Local"), local, None).unwrap();
+        assert_eq!(load().unwrap().enabled_profile(None).unwrap().name, "Renamed local");
+        select(None).unwrap();
+        let stored = load().unwrap();
+        assert!(stored.enabled_profile(None).is_err());
+        assert_eq!(stored.profiles.len(), 2);
+
+        select(Some("Renamed local")).unwrap();
+        remove("Renamed local").unwrap();
+        let stored = load().unwrap();
+        assert!(stored.active.is_none(), "Removing the active provider must leave AI off");
+        assert_eq!(stored.profiles.len(), 1);
+        assert_eq!(stored.profiles[0].name, "Cloud");
     }
 }

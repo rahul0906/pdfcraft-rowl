@@ -37,6 +37,42 @@ fn listed_tools(flags: &[&str]) -> Vec<String> {
     reply["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn ai_mcp_lists_the_tools_and_discovers_models_in_compact_mode() {
+    use std::net::TcpListener;
+
+    use super::text::{ai_mock_reply, ai_mock_request};
+
+    let full = session(&[], &[request(1, "tools/list", json!({}))]).remove(0);
+    let tools = full["result"]["tools"].as_array().unwrap();
+    for name in ["ai_ask", "ai_summarize", "ai_translate", "ai_llama_models"] {
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("Missing MCP tool {name}"));
+        assert_eq!(tool["annotations"]["openWorldHint"], true, "{name}");
+        if name != "ai_llama_models" {
+            let fields = &tool["inputSchema"]["properties"];
+            assert_eq!(fields["user_confirmed"]["type"], "boolean", "{name}");
+            assert_eq!(fields["confirmed_endpoint"]["type"], "string", "{name}");
+            assert_eq!(fields["confirmed_model"]["type"], "string", "{name}");
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let (socket, body) = ai_mock_request(&listener, "GET /v1/models");
+            assert!(body.is_empty());
+            ai_mock_reply(socket, r#"{"data":[{"id":"local-model"}]}"#);
+        });
+        let call = request(2, "tools/call", json!({"name":"ai_llama_models","arguments":{"base_url":base_url}}));
+        let reply = session(&["--compact"], &[call]).remove(0);
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        assert_eq!(reply["result"]["structuredContent"], json!({"models":["local-model"]}));
+        server.join().unwrap();
+    });
+}
+
 #[test]
 fn mcp_rejects_unknown_options_before_starting_the_server() {
     for option in ["--totally-bogus-flag", "--rot", "--root=."] {

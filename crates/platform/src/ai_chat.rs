@@ -207,9 +207,40 @@ mod tests {
         assert!(reopened.enabled);
         assert!(reopened.revisions.iter().all(|entry| entry.id != edited));
         assert_eq!(reopened.revisions[0].turns[0].scope, (1, 3));
+        let summary =
+            Turn { task: Task::Summarize, question: "Summarize pages 2–2".into(), answer: "Updated.".into(), citations: Vec::new(), scope: (2, 2) };
+        save_at(&path, true, Some((&edited, &[summary]))).unwrap();
         save_at(&path, false, None).unwrap();
-        assert_eq!(read(&path).unwrap().revisions.len(), 1);
+        let disabled = read(&path).unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.revisions.len(), 2);
         save_at(&path, false, Some((&first, &[]))).unwrap();
+        let remaining = read(&path).unwrap();
+        assert_eq!(remaining.revisions.len(), 1);
+        assert_eq!(remaining.revisions[0].id, edited);
+        let turn = &remaining.revisions[0].turns[0];
+        assert!(turn.task == Task::Summarize);
+        assert_eq!(turn.scope, (2, 2));
+        assert_eq!(turn.answer, "Updated.");
+        save_at(&path, false, Some((&edited, &[]))).unwrap();
         assert!(read(&path).unwrap().revisions.is_empty());
+    }
+
+    #[test]
+    fn legacy_chat_turns_still_open_as_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.json");
+        fs::write(
+            &path,
+            r#"{"enabled":true,"revisions":[{"id":"original","turns":[{"question":"Where?","answer":"Here. [Page 2]","citations":[{"page":2,"excerpt":"Here."}]}]}]}"#,
+        )
+        .unwrap();
+        let saved = read(&path).unwrap();
+        let turn = &saved.revisions[0].turns[0];
+        assert!(turn.task == Task::Ask);
+        assert_eq!(turn.question, "Where?");
+        assert_eq!(turn.answer, "Here. [Page 2]");
+        assert_eq!(turn.citations[0].page, 2);
+        assert_eq!(turn.citations[0].excerpt, "Here.");
     }
 }

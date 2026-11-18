@@ -253,6 +253,13 @@ pub fn tools() -> Vec<ToolDef> {
         t("object_paste", "Paste copied objects", "Edit ▸ Paste of what object_copy copied, onto page of doc as page content that draws the same: where it was, or on the page it came from 18 points down and to the right, and 18 more for each further paste onto the same page; centred when that would leave it off the page. Resources join the page's under names that don't clash; into another document the fonts, images and other objects they use are copied (each once, sharing what is there; refused past 20,000 objects or 256 MB). Pasted content is untagged and in no layer. One undo step.")
             .with(schema(json!({"doc":doc(),"page":{"type":"integer","minimum":1}}), &["doc","page"])),
         #[cfg(target_os = "macos")]
+        t("ai_llama_models", "List local llama.cpp models", "List model IDs from a running llama-server on this Mac. Sends no document text or prompt.")
+            .ro()
+            .with(schema(json!({
+                "base_url": {"type":"string", "description":"Loopback URL for a keyless server, default http://127.0.0.1:8080/v1. Omit when using a saved profile."},
+                "provider": {"type":"string", "description":"Use a saved llama.cpp profile, including its Keychain credential when configured."}
+            }), &[])),
+        #[cfg(target_os = "macos")]
         t("ai_ask", "Ask about this PDF", "Search the selected pages locally and ask an AI provider using matching passages. First preview with user_confirmed omitted, then tell the user that the question, optional previous turn, and matching passages can be sent to the shown provider. After consent, repeat the call with user_confirmed true and the previewed endpoint and model. Returns only verified source references. Provider charges may apply.")
             .cmd("ai.ask")
             .with(schema(json!({ "doc": doc(), "question": { "type": "string", "minLength": 1 },

@@ -684,4 +684,45 @@ mod tests {
         h.run_steps(4);
         assert!(h.query_by_label("Page 2").is_none());
     }
+
+    #[test]
+    fn stopping_a_chat_request_discards_its_late_answer() {
+        let (reply, job) = std::sync::mpsc::channel();
+        let bytes = pdfcraft_engine::Session::new().create_from_text("Test", "One").unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("test.pdf", None, bytes.as_ref().clone()).unwrap();
+            app.run_command("ai.ask");
+            let (_, id) = app.active_ids().unwrap();
+            let chat = app.ai_chats.get_mut(&id).unwrap();
+            chat.destination = Ok(ai::Profile::llama_cpp("Local".into(), ai::LLAMA_CPP_URL.into(), "local-model".into()));
+            chat.question = "What is on page one?".into();
+            chat.pending = Some(chat.question.clone());
+            chat.job = Some(job);
+            app
+        });
+        h.run_steps(4);
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Stop").click();
+        h.run_steps(4);
+        h.get_by_label("Stopping…");
+        reply
+            .send(Ok((
+                None,
+                Turn {
+                    task: Task::Ask,
+                    question: "What is on page one?".into(),
+                    answer: "Late answer.".into(),
+                    citations: Vec::new(),
+                    scope: (1, 1),
+                },
+            )))
+            .unwrap_or_else(|_| panic!("Chat dropped its pending worker"));
+        h.run_steps(4);
+        let (_, id) = h.state().active_ids().unwrap();
+        let chat = h.state().ai_chats.get(&id).unwrap();
+        assert!(chat.job.is_none() && chat.pending.is_none());
+        assert!(chat.turns.is_empty());
+        assert_eq!(chat.question, "What is on page one?");
+    }
 }

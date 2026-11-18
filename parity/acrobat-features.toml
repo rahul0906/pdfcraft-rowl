@@ -9833,9 +9833,9 @@ tier = "P2"
 milestone = "M13"
 status = "partial"
 commands = []
-tools = ["ai_summarize"]
-evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_summary_previews_then_sends_only_confirmed_pages"]
-notes = "Local macOS implementation for OpenAI-compatible connections, with Keychain credentials."
+tools = ["ai_llama_models", "ai_summarize"]
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_summary_previews_then_sends_only_confirmed_pages", "apps/pdfcraft-cli/tests/it/text.rs::ai_llama_cpp_discovers_models_and_runs_all_document_actions", "apps/pdfcraft-cli/tests/it/mcp_compact.rs::ai_mcp_lists_the_tools_and_discovers_models_in_compact_mode"]
+notes = "macOS supports OpenAI-compatible connections and loopback llama.cpp with model discovery and optional Keychain credentials."
 
 [[feature]]
 id = "misc.ai-summary"

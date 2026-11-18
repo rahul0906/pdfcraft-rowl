@@ -306,12 +306,148 @@ fn ai_translate_sends_the_target_language_and_only_confirmed_pages() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn ai_llama_cpp_discovers_models_and_runs_all_document_actions() {
+    use std::net::TcpListener;
+
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let pdf = root.join("fixture.pdf");
+    std::fs::write(&pdf, fixture(2)).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+    let endpoint = format!("http://{}/v1/chat/completions", listener.local_addr().unwrap());
+    let question = "What is on page 2?";
+    let page_text = "[Page 2]\nPage 2\n\n";
+    let profile = json!({"name":"llama.cpp", "base_url":base_url, "model":"local-model", "llama_cpp":true});
+    let settings = root.join("Library/Application Support/PdfCraft");
+    std::fs::create_dir_all(&settings).unwrap();
+    std::fs::write(settings.join("ai-providers.json"), json!({"active":"llama.cpp", "profiles":[profile]}).to_string()).unwrap();
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            for _ in 0..2 {
+                let (socket, body) = ai_mock_request(&listener, "GET /v1/models");
+                assert!(body.is_empty());
+                ai_mock_reply(socket, r#"{"data":[{"id":"local-model"},{"id":"other-model"},{"id":"local-model"},{"id":""}]}"#);
+            }
+            let requests = [
+                (json!(page_text), "Local summary."),
+                (json!({"question":question,"recent_turns":[],"sources":[{"source":1,"page":2,"text":"Page 2"}]}), "The text is Page 2. [S1]"),
+                (json!({"target_language":"Spanish","text":page_text}), "Página 2"),
+            ];
+            for (expected, answer) in requests {
+                let (socket, body) = ai_mock_request(&listener, "POST /v1/chat/completions");
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(payload["model"], "local-model");
+                assert_eq!(payload["stream"], false);
+                let input = payload["messages"][1]["content"].as_str().unwrap();
+                if expected.is_object() {
+                    assert_eq!(serde_json::from_str::<Value>(input).unwrap(), expected);
+                } else {
+                    assert_eq!(input, expected.as_str().unwrap());
+                }
+                ai_mock_reply(socket, &json!({"choices":[{"message":{"content":answer},"finish_reason":"stop"}]}).to_string());
+            }
+        });
+        let (ok, report) = run_ai_script(
+            root,
+            json!([
+                {"tool":"ai_llama_models","args":{"base_url":base_url}},
+                {"tool":"ai_llama_models","args":{"provider":"llama.cpp"}},
+                {"tool":"doc_open","args":{"path":pdf}},
+                {"tool":"ai_summarize","args":{"doc":1,"first_page":2,"last_page":2}},
+                {"tool":"ai_summarize","args":{"doc":1,"first_page":2,"last_page":2,"user_confirmed":true,
+                    "confirmed_endpoint":endpoint,"confirmed_model":"local-model"}},
+                {"tool":"ai_ask","args":{"doc":1,"first_page":2,"last_page":2,"question":question,"user_confirmed":true,
+                    "confirmed_endpoint":endpoint,"confirmed_model":"local-model"}},
+                {"tool":"ai_translate","args":{"doc":1,"first_page":2,"last_page":2,"target_language":"Spanish","user_confirmed":true,
+                    "confirmed_endpoint":endpoint,"confirmed_model":"local-model"}}
+            ]),
+        );
+        server.join().unwrap();
+        assert!(ok, "{report}");
+        let result = |index: usize| &report["steps"][index]["result"][0];
+        assert_eq!(result(0)["models"], json!(["local-model", "other-model"]));
+        assert_eq!(result(1), result(0));
+        assert_eq!(result(3)["endpoint"], endpoint);
+        assert_eq!(result(3)["sent"], false);
+        for index in 4..=6 {
+            assert_eq!(result(index)["sent"], true);
+        }
+        assert_eq!(result(4)["summary"], "Local summary.");
+        assert_eq!(result(5)["answer"], "The text is Page 2. [Page 2]");
+        assert_eq!(result(5)["citations"], json!([{"page":2,"excerpt":"Page 2"}]));
+        assert_eq!(result(6)["translation"], "Página 2");
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn run_ai_script(root: &std::path::Path, steps: serde_json::Value) -> (bool, serde_json::Value) {
+    let script = root.join("ai-script.json");
+    std::fs::write(&script, steps.to_string()).unwrap();
+    let output = Command::new(BIN).env("HOME", root).args(["run", "--report", "--script"]).arg(&script).arg("--root").arg(root).output().unwrap();
+    let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
+    (output.status.success(), report)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn ai_mock_request(listener: &std::net::TcpListener, request: &str) -> (std::net::TcpStream, Vec<u8>) {
+    use std::io::{BufRead, BufReader, ErrorKind, Read};
+    use std::time::{Duration, Instant};
+
+    // Keep the mock bounded even if a regression prevents the request.
+    listener.set_nonblocking(true).unwrap();
+    let start = Instant::now();
+    let mut socket = loop {
+        match listener.accept() {
+            Ok((socket, _)) => break socket,
+            Err(e) if e.kind() == ErrorKind::WouldBlock && start.elapsed() < Duration::from_secs(5) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("mock provider received no request: {e}"),
+        }
+    };
+    socket.set_nonblocking(false).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut read = BufReader::new(&mut socket);
+    let mut line = String::new();
+    read.read_line(&mut line).unwrap();
+    assert_eq!(line, format!("{request} HTTP/1.1\r\n"));
+    let mut length = 0;
+    loop {
+        line.clear();
+        assert_ne!(read.read_line(&mut line).unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            assert!(!name.eq_ignore_ascii_case("Authorization"), "keyless local profile");
+            if name.eq_ignore_ascii_case("Content-Length") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    read.read_exact(&mut body).unwrap();
+    (socket, body)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn ai_mock_reply(mut socket: std::net::TcpStream, reply: &str) {
+    use std::io::Write;
+
+    write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len())
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
 fn ai_provider_mock(responses: bool, tool: &str) {
     let ask = tool == "ai_ask";
     let translate = tool == "ai_translate";
-    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
-    use std::time::Duration;
 
     use serde_json::{Value, json};
 
@@ -337,24 +473,12 @@ fn ai_provider_mock(responses: bool, tool: &str) {
         std::fs::write(&preferences, json!({"active":active, "profiles":[profile]}).to_string()).unwrap();
     };
     let run = |args: Value, mark: bool| {
-        let script = root.path().join("summary.json");
         let mut steps = vec![json!({"tool":"doc_open","args":{"path":pdf}})];
         if mark {
             steps.push(json!({"tool":"redact_mark","args":{"doc":1,"page":2,"whole_pages":true}}));
         }
         steps.push(json!({"tool":tool,"args":args}));
-        let steps = json!(steps);
-        std::fs::write(&script, steps.to_string()).unwrap();
-        let output = Command::new(BIN)
-            .env("HOME", root.path())
-            .args(["run", "--report", "--script"])
-            .arg(&script)
-            .arg("--root")
-            .arg(root.path())
-            .output()
-            .unwrap();
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
-        (output.status.success(), report)
+        run_ai_script(root.path(), json!(steps))
     };
     let args = if ask {
         json!({"doc":1, "question":"Are there exceptions?", "previous_question":"What is the refund policy?", "previous_answer":"The policy mentions refunds."})
@@ -405,40 +529,7 @@ fn ai_provider_mock(responses: bool, tool: &str) {
 
     std::thread::scope(|scope| {
         let server = scope.spawn(|| {
-            // Keep the mock bounded even if a regression prevents the request.
-            listener.set_nonblocking(true).unwrap();
-            let start = std::time::Instant::now();
-            let mut socket = loop {
-                match listener.accept() {
-                    Ok((socket, _)) => break socket,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && start.elapsed() < Duration::from_secs(5) => {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(e) => panic!("mock provider received no request: {e}"),
-                }
-            };
-            socket.set_nonblocking(false).unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let mut read = BufReader::new(&mut socket);
-            let mut line = String::new();
-            read.read_line(&mut line).unwrap();
-            assert_eq!(line, format!("POST {route} HTTP/1.1\r\n"));
-            let mut length = None;
-            loop {
-                line.clear();
-                assert_ne!(read.read_line(&mut line).unwrap(), 0);
-                if line == "\r\n" {
-                    break;
-                }
-                if let Some((name, value)) = line.split_once(':') {
-                    assert!(!name.eq_ignore_ascii_case("Authorization"), "keyless local profile");
-                    if name.eq_ignore_ascii_case("Content-Length") {
-                        length = Some(value.trim().parse::<usize>().unwrap());
-                    }
-                }
-            }
-            let mut body = vec![0; length.unwrap()];
-            read.read_exact(&mut body).unwrap();
+            let (socket, body) = ai_mock_request(&listener, &format!("POST {route}"));
             let payload: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(payload["model"], "mock-model");
             let reply = if ask {
@@ -462,12 +553,7 @@ fn ai_provider_mock(responses: bool, tool: &str) {
                 assert_eq!(payload["messages"][1]["content"], "[Page 2]\nPage 2\n\n");
                 r#"{"choices":[{"message":{"content":"A summary of page two."},"finish_reason":"stop"}]}"#
             };
-            write!(
-                socket,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                reply.len()
-            )
-            .unwrap();
+            ai_mock_reply(socket, reply);
         });
         let (ok, result) = run(confirm, false);
         server.join().unwrap();
