@@ -108,6 +108,7 @@ pub struct Index {
     passages: Vec<IndexedPassage>,
     counts: HashMap<String, usize>,
     average_length: f64,
+    pub ocr_report: crate::ai_ocr::Report,
 }
 
 pub fn source(doc: &Document, first: usize, last: usize) -> Result<Source, String> {
@@ -176,14 +177,24 @@ fn terms(text: &str) -> impl Iterator<Item = String> + '_ {
 
 impl Index {
     pub fn build(sources: Vec<Source>, cancelled: impl Fn() -> bool) -> Result<Self, String> {
+        Self::build_with_ocr(sources, None, cancelled)
+    }
+
+    pub fn build_with_ocr(sources: Vec<Source>, options: Option<&crate::ai_ocr::Options>, cancelled: impl Fn() -> bool) -> Result<Self, String> {
         validate_scope(&sources)?;
-        let mut index = Self { passages: Vec::new(), counts: HashMap::new(), average_length: 0.0 };
+        let mut reader = options.map(crate::ai_ocr::Reader::new).transpose()?;
+        let mut index = Self { passages: Vec::new(), counts: HashMap::new(), average_length: 0.0, ocr_report: Default::default() };
         let mut bytes = 0usize;
         for Source { doc, snapshot, selection } in sources {
             if cancelled() {
                 return Err("Question stopped.".into());
             }
-            snapshot.visit_pages(|page, text| {
+            let region = match selection {
+                Some(Selection::Rect { rect, .. }) => Some(rect),
+                _ => None,
+            };
+            let ocr = reader.as_mut().filter(|_| !matches!(selection, Some(Selection::Run { .. })));
+            snapshot.visit_pages_with_ocr(ocr, region, &cancelled, |page, text| {
                 if cancelled() {
                     return Err("Question stopped.".into());
                 }
@@ -211,10 +222,18 @@ impl Index {
             })?;
         }
         if bytes == 0 {
-            return Err(NO_SELECTABLE_TEXT.into());
+            let message = if reader.as_ref().is_some_and(|reader| reader.report.pages_read > 0) {
+                "Local OCR found no readable text in the selected pages or area."
+            } else {
+                NO_SELECTABLE_TEXT
+            };
+            return Err(message.into());
         }
         if !index.passages.is_empty() {
             index.average_length /= index.passages.len() as f64;
+        }
+        if let Some(reader) = reader {
+            index.ocr_report = reader.report;
         }
         Ok(index)
     }

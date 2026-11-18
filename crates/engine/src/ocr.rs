@@ -783,67 +783,69 @@ impl OcrSteps {
     }
 
     fn prepare(&mut self, page: usize, info: PageInfo) -> Result<OcrShot, OcrPage> {
-        let settings = &self.job.settings;
-        let skip = |why: &str| OcrPage { page, words: Vec::new(), already_on_page: 0, skipped: Some(why.into()), notes: Vec::new() };
-        let r = &mut self.renderer;
-        // The boxes of all text on the page, in view space: an earlier OCR layer's, and words
-        // only /ActualText names, so neither is read again.
-        let existing: Vec<[f32; 4]> = r
-            .render(RenderRequest { page, kind: RequestKind::Text, scale: 1.0, ..Default::default() })
-            .text
-            .map(|t| t.glyphs.iter().filter(|g| !g.text.trim().is_empty()).map(|g| g.rect).collect())
-            .unwrap_or_default();
-        if settings.skip_text_pages && !settings.force_ocr && !existing.is_empty() && has_own_text(r, page) {
-            return Err(skip("the page already contains text"));
-        }
-        // A scan is read at its own resolution (enlarging it only blurs the letters), at
-        // most the chosen one.
         let scale = self.job.render_scale(page);
-        let shot = r.render(RenderRequest { page, scale, ..Default::default() });
-        if let Some(e) = shot.error {
-            return Err(skip(&e));
-        }
-        let full = pdfcraft_ocr::OcrImage::new(shot.width, shot.height, shot.rgba.to_vec()).map_err(|e| skip(&e.to_string()))?;
-        // The optional region: crop the rendered page, clamped; an empty region skips the
-        // page with a named reason (nothing was asked of it).
-        let (image, offset) = match settings.region {
-            None => (full, [0.0f32; 2]),
-            Some(region) => match clamp_region(region, shot.width, shot.height) {
-                Some([x0, y0, x1, y1]) => match crop(&full, x0, y0, x1, y1) {
-                    Some(c) => (c, [x0 as f32, y0 as f32]),
-                    None => return Err(skip("the selected region is empty")),
-                },
-                None => return Err(skip("the selected region is outside the page")),
-            },
-        };
-        // Preprocessing sits between the page raster and recognition; its word boxes come
-        // back in processed coordinates and are mapped to the ORIGINAL raster's before
-        // placement. The render dpi is the real one (pixels per point × 72), never a
-        // fixed value.
-        let pre = pdfcraft_ocr::preprocess::preprocess(
-            image,
-            scale * 72.0,
-            &pdfcraft_ocr::preprocess::PreprocessOptions {
-                auto_rotate: settings.auto_rotate,
-                deskew: settings.deskew,
-                denoise: settings.denoise,
-                binarize: settings.binarize,
-            },
-        )
-        .map_err(|e| skip(&e.to_string()))?;
-        Ok(OcrShot {
-            page,
-            image: Some(pre.image),
-            inverse: pre.inverse_transform,
-            offset,
-            pixels_per_point: shot.width as f32 / info.width.max(1e-3),
-            info,
-            existing,
-            strategy: settings.strategy,
-            options: pdfcraft_ocr::RecognizeOptions { language: settings.language.clone() },
-            output_mode: settings.output_mode,
-        })
+        prepare_shot(&mut self.renderer, page, info, &self.job.settings, scale)
     }
+}
+
+pub(crate) fn prepare_shot(r: &mut PageRenderer, page: usize, info: PageInfo, settings: &OcrSettings, scale: f32) -> Result<OcrShot, OcrPage> {
+    let skip = |why: &str| OcrPage { page, words: Vec::new(), already_on_page: 0, skipped: Some(why.into()), notes: Vec::new() };
+    // The boxes of all text on the page, in view space: an earlier OCR layer's, and words
+    // only /ActualText names, so neither is read again.
+    let existing: Vec<[f32; 4]> = r
+        .render(RenderRequest { page, kind: RequestKind::Text, scale: 1.0, ..Default::default() })
+        .text
+        .map(|t| t.glyphs.iter().filter(|g| !g.text.trim().is_empty()).map(|g| g.rect).collect())
+        .unwrap_or_default();
+    if settings.skip_text_pages && !settings.force_ocr && !existing.is_empty() && has_own_text(r, page) {
+        return Err(skip("the page already contains text"));
+    }
+    // A scan is read at its own resolution (enlarging it only blurs the letters), at
+    // most the chosen one.
+    let shot = r.render(RenderRequest { page, scale, ..Default::default() });
+    if let Some(e) = shot.error {
+        return Err(skip(&e));
+    }
+    let full = pdfcraft_ocr::OcrImage::new(shot.width, shot.height, shot.rgba.to_vec()).map_err(|e| skip(&e.to_string()))?;
+    // The optional region: crop the rendered page, clamped; an empty region skips the
+    // page with a named reason (nothing was asked of it).
+    let (image, offset) = match settings.region {
+        None => (full, [0.0f32; 2]),
+        Some(region) => match clamp_region(region, shot.width, shot.height) {
+            Some([x0, y0, x1, y1]) => match crop(&full, x0, y0, x1, y1) {
+                Some(c) => (c, [x0 as f32, y0 as f32]),
+                None => return Err(skip("the selected region is empty")),
+            },
+            None => return Err(skip("the selected region is outside the page")),
+        },
+    };
+    // Preprocessing sits between the page raster and recognition; its word boxes come
+    // back in processed coordinates and are mapped to the ORIGINAL raster's before
+    // placement. The render dpi is the real one (pixels per point × 72), never a
+    // fixed value.
+    let pre = pdfcraft_ocr::preprocess::preprocess(
+        image,
+        scale * 72.0,
+        &pdfcraft_ocr::preprocess::PreprocessOptions {
+            auto_rotate: settings.auto_rotate,
+            deskew: settings.deskew,
+            denoise: settings.denoise,
+            binarize: settings.binarize,
+        },
+    )
+    .map_err(|e| skip(&e.to_string()))?;
+    Ok(OcrShot {
+        page,
+        image: Some(pre.image),
+        inverse: pre.inverse_transform,
+        offset,
+        pixels_per_point: shot.width as f32 / info.width.max(1e-3),
+        info,
+        existing,
+        strategy: settings.strategy,
+        options: pdfcraft_ocr::RecognizeOptions { language: settings.language.clone() },
+        output_mode: settings.output_mode,
+    })
 }
 
 /// A page prepared for recognition: the image an engine reads, and what placing the words

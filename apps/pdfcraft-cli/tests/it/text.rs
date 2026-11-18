@@ -435,6 +435,208 @@ fn ai_ask_text_selection_sends_only_the_selected_text() {
 }
 
 #[cfg(target_os = "macos")]
+fn scan_fixture() -> std::sync::Arc<Vec<u8>> {
+    use pdfcraft_engine::{ImageResolution, Session};
+    use pdfcraft_render::{PageRenderer, RenderRequest};
+
+    let source =
+        fixture_streams(vec!["BT /F1 18 Tf 18 225 Td (Copper harvest) Tj 0 -36 Td (Yield was 47 tons) Tj 0 -120 Td (Private note) Tj ET".into()]);
+    let raster = PageRenderer::new(source.into(), Default::default()).render(RenderRequest { scale: 3.0, ..Default::default() });
+    assert!(raster.error.is_none());
+    let png = pdfcraft_engine::export::encode_png(raster.width, raster.height, &raster.rgba).unwrap();
+    Session::new().create_from_images_with_resolution(&[("scan.png".into(), png)], ImageResolution::Dpi(216.0)).unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ai_scanned_pdf_asks_and_translates_with_local_ocr_without_editing() {
+    use std::net::TcpListener;
+
+    use serde_json::{Value, json};
+
+    if !pdfcraft_engine::ocr::engines_status().iter().any(|engine| engine.id == "ocrs" && engine.available) {
+        assert!(std::env::var_os("PDFCRAFT_MODELS").is_none(), "configured ocrs models were unavailable");
+        eprintln!("Set PDFCRAFT_MODELS to run the image-only PDF regression.");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let bytes = scan_fixture();
+    std::fs::write(root.join("scan.pdf"), bytes.as_slice()).unwrap();
+    std::fs::write(root.join("digital.pdf"), fixture_streams(vec!["BT /F1 18 Tf 18 225 Td (Copper benchmark) Tj ET".into()])).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = write_ai_test_profile(root, &listener);
+    let run = |tool, args| {
+        run_ai_script(
+            root,
+            json!([
+                {"tool":"doc_open", "args":{"path":"scan.pdf"}},
+                {"tool":"doc_open", "args":{"path":"digital.pdf"}},
+                {"tool":tool, "args":args}
+            ]),
+        )
+    };
+    let confirm = |tool, mut args: Value| {
+        let (ok, report) = run(tool, args.clone());
+        assert!(ok, "{report}");
+        let preview = &report["steps"][2]["result"][0];
+        assert_eq!(preview["sent"], false);
+        args["user_confirmed"] = json!(true);
+        args["confirmed_endpoint"] = json!(endpoint);
+        args["confirmed_model"] = json!("mock-model");
+        args["confirmed_scope"] = preview["scope_token"].clone();
+        args
+    };
+    let ask = confirm(
+        "ai_ask",
+        json!({
+            "documents":[{"doc":1},{"doc":2}],"question":"What was the copper yield?", "ocr_language":"en","ocr_engine":"ocrs"
+        }),
+    );
+    let translate = confirm(
+        "ai_translate",
+        json!({
+            "doc":1,"selection":{"page":1,"rect":[10,45,195,145]},"target_language":"French","ocr_language":"en","ocr_engine":"ocrs"
+        }),
+    );
+    let mut changed = translate.clone();
+    changed["selection"]["rect"] = json!([10, 150, 195, 265]);
+    let (ok, report) = run("ai_translate", changed);
+    assert!(!ok && report["steps"][2]["error"].as_str().unwrap().contains("scope token"), "{report}");
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let (socket, body) = ai_mock_request(&listener, "POST /v1/chat/completions");
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            let input: Value = serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+            let sources = input["sources"].as_array().unwrap();
+            assert!(sources.iter().any(|s| s["document"] == "digital.pdf" && s["text"] == "Copper benchmark"), "{input}");
+            let scan = sources.iter().find(|s| s["document"] == "scan.pdf").unwrap();
+            assert!(scan["text"].as_str().unwrap().contains("Yield was 47 tons"), "{input}");
+            let answer = format!("The yield was 47 tons [S{}].", scan["source"]);
+            ai_mock_reply(socket, &json!({"choices":[{"message":{"content":answer},"finish_reason":"stop"}]}).to_string());
+
+            let (socket, body) = ai_mock_request(&listener, "POST /v1/chat/completions");
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            let input: Value = serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(input["target_language"], "French");
+            let text = input["text"].as_str().unwrap();
+            assert!(text.contains("Copper harvest") && text.contains("47 tons") && !text.contains("Private"), "{input}");
+            ai_mock_reply(socket, r#"{"choices":[{"message":{"content":"Le rendement était de 47 tonnes."},"finish_reason":"stop"}]}"#);
+        });
+        let (ok, report) = run("ai_ask", ask);
+        assert!(ok, "{report}");
+        let result = &report["steps"][2]["result"][0];
+        assert_eq!(result["ocr_report"]["pages_read"], 1, "{result}");
+        assert_eq!(result["citations"][0]["location"]["doc"], 1);
+        assert!(result["citations"][0]["location"]["rects"].as_array().is_some_and(|rects| rects.len() >= 2));
+        let (ok, report) = run("ai_translate", translate);
+        assert!(ok, "{report}");
+        let result = &report["steps"][2]["result"][0];
+        assert_eq!(result["translation"], "Le rendement était de 47 tonnes.");
+        assert_eq!(result["ocr_report"]["pages_read"], 1);
+        let passage = &result["source_passages"][0];
+        assert_eq!(passage["page"], 1);
+        assert!(passage["text"].as_str().unwrap().contains("47 tons"));
+        assert!(passage["rects"].as_array().unwrap().iter().all(|rect| rect[1].as_f64().unwrap() >= 45.0 && rect[3].as_f64().unwrap() <= 145.0));
+        server.join().unwrap();
+    });
+    assert_eq!(std::fs::read(root.join("scan.pdf")).unwrap(), *bytes);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ai_figure_sends_only_the_confirmed_crop_to_local_vision() {
+    use std::net::TcpListener;
+
+    use base64::Engine as _;
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    std::fs::write(root.join("graph.pdf"), fixture_streams(vec!["1 0 0 rg 10 195 65 60 re f 0 0 1 rg 100 195 80 60 re f".into()])).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = write_ai_test_profile(root, &listener);
+    let run = |args: Value| {
+        run_ai_script(
+            root,
+            json!([
+                {"tool":"doc_open","args":{"path":"graph.pdf"}},
+                {"tool":"ai_ask","args":args}
+            ]),
+        )
+    };
+    let mut args = json!({
+        "doc":1,"selection":{"page":1,"rect":[5,40,85,110]},"question":"What color is the rectangle?",
+        "ocr_language":"en","ocr_engine":"ocrs","vision":true
+    });
+    let (ok, report) = run(args.clone());
+    assert!(ok, "{report}");
+    args["user_confirmed"] = json!(true);
+    args["confirmed_endpoint"] = json!(endpoint);
+    args["confirmed_model"] = json!("mock-model");
+    args["confirmed_scope"] = report["steps"][1]["result"][0]["scope_token"].clone();
+    let (ok, report) = run(args.clone());
+    assert!(!ok && report["steps"][1]["error"].as_str().unwrap().contains("local llama.cpp vision profile"), "{report}");
+    let profile = root.join("Library/Application Support/PdfCraft/ai-providers.json");
+    let mut profiles: Value = serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+    profiles["profiles"][0]["llama_cpp"] = json!(true);
+    std::fs::write(profile, profiles.to_string()).unwrap();
+
+    let (ok, report) = run_ai_script(
+        root,
+        json!([
+            {"tool":"doc_open","args":{"path":"graph.pdf"}},
+            {"tool":"redact_mark","args":{"doc":1,"page":1,"rect":[20,50,80,100]}},
+            {"tool":"doc_save","args":{"doc":1,"path":"marked.pdf"}}
+        ]),
+    );
+    assert!(ok, "{report}");
+    let with_redaction = |args: Value| {
+        run_ai_script(
+            root,
+            json!([
+                {"tool":"doc_open","args":{"path":"marked.pdf"}},
+                {"tool":"ai_ask","args":args}
+            ]),
+        )
+    };
+    let mut redacted_args = args.clone();
+    redacted_args["user_confirmed"] = json!(false);
+    let (ok, report) = with_redaction(redacted_args.clone());
+    assert!(ok, "{report}");
+    redacted_args["user_confirmed"] = json!(true);
+    redacted_args["confirmed_scope"] = report["steps"][1]["result"][0]["scope_token"].clone();
+    let (ok, report) = with_redaction(redacted_args);
+    assert!(!ok && report["steps"][1]["error"].as_str().unwrap().contains("unapplied redactions"), "{report}");
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let (socket, body) = ai_mock_request(&listener, "POST /v1/chat/completions");
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            let content = &payload["messages"][1]["content"];
+            assert_eq!(content[1]["text"], "What color is the rectangle?");
+            let url = content[0]["image_url"]["url"].as_str().unwrap();
+            let png = base64::engine::general_purpose::STANDARD.decode(url.strip_prefix("data:image/png;base64,").unwrap()).unwrap();
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+            assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 240);
+            assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 210);
+            ai_mock_reply(socket, r#"{"choices":[{"message":{"content":"The rectangle is red."},"finish_reason":"stop"}]}"#);
+        });
+        let (ok, report) = run(args);
+        server.join().unwrap();
+        assert!(ok, "{report}");
+        let result = &report["steps"][1]["result"][0];
+        assert_eq!(result["answer"], "The rectangle is red.");
+        assert_eq!(result["citations"][0]["location"]["rects"], json!([[5.0, 40.0, 85.0, 110.0]]));
+    });
+}
+
+#[cfg(target_os = "macos")]
 fn write_ai_test_profile(root: &std::path::Path, listener: &std::net::TcpListener) -> String {
     let settings = root.join("Library/Application Support/PdfCraft");
     std::fs::create_dir_all(&settings).unwrap();

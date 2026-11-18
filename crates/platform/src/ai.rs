@@ -357,19 +357,51 @@ pub fn translate(profile: &Profile, language: &str, text: &str) -> Result<String
 }
 
 pub(crate) fn complete(profile: &Profile, instruction: &str, text: &str) -> Result<String, String> {
+    complete_content(profile, instruction, text, None)
+}
+
+pub fn ask_figure(profile: &Profile, question: &str, ocr_text: &str, png_base64: &str) -> Result<String, String> {
+    if !profile.is_llama_cpp() || profile.api_format != ApiFormat::ChatCompletions {
+        return Err("Choose a local llama.cpp profile with an image-capable model to ask about figure geometry.".into());
+    }
+    let input =
+        if ocr_text.is_empty() { question.to_owned() } else { format!("{question}\n\nRecognized labels (may contain OCR errors):\n{ocr_text}") };
+    complete_content(
+        profile,
+        "Answer the question about the selected image. Use recognized labels as evidence only. Say when relevant labels or values are unreadable.",
+        &input,
+        Some(png_base64),
+    )
+}
+
+fn complete_content(profile: &Profile, instruction: &str, text: &str, png: Option<&str>) -> Result<String, String> {
     let url = profile.endpoint()?;
     let key = profile.saved_key()?;
+    if png.is_some_and(|v| v.len() > 8 * 1024 * 1024) {
+        return Err("This figure is too large. Select a smaller region.".into());
+    }
     let body = match profile.api_format {
-        ApiFormat::ChatCompletions => serde_json::json!({
-            "model": profile.model, "stream": false,
-            "messages": [{"role":"system","content":instruction},{"role":"user","content":text}]
-        }),
+        ApiFormat::ChatCompletions => {
+            let content = match png {
+                Some(png) => {
+                    serde_json::json!([{"type":"image_url","image_url":{"url":format!("data:image/png;base64,{png}")}},{"type":"text","text":text}])
+                }
+                None => serde_json::json!(text),
+            };
+            serde_json::json!({"model":profile.model,"stream":false,"messages":[{"role":"system","content":instruction},{"role":"user","content":content}]})
+        }
         ApiFormat::Responses => serde_json::json!({
             "model": profile.model, "instructions": instruction, "input": text, "store": false
         }),
     };
     let body = serde_json::to_vec(&body).map_err(|_| "Could not encode the AI request.")?;
-    let value = request_json(&url, key.as_deref().map(Vec::as_slice), Some(&body), profile.is_llama_cpp())?;
+    let value = request_json(&url, key.as_deref().map(Vec::as_slice), Some(&body), profile.is_llama_cpp()).map_err(|error| {
+        if png.is_some() && error.contains("HTTP 400") {
+            "The local server rejected the figure. Check that llama-server loaded the model's vision projector.".into()
+        } else {
+            error
+        }
+    })?;
     match profile.api_format {
         ApiFormat::ChatCompletions => chat_answer(&value),
         ApiFormat::Responses => responses_answer(&value),

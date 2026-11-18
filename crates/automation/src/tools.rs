@@ -260,13 +260,15 @@ pub fn tools() -> Vec<ToolDef> {
                 "provider": {"type":"string", "description":"Use a saved llama.cpp profile, including its Keychain credential when configured."}
             }), &[])),
         #[cfg(target_os = "macos")]
-        t("ai_ask", "Ask about selected PDFs", "Search the chosen PDFs locally or use a text selection. First preview with user_confirmed omitted, then tell the user which text, question and optional previous turn can be sent to the shown provider. After consent, repeat with user_confirmed true and the previewed endpoint and model. With documents or selection, also echo scope_token as confirmed_scope. Provider charges may apply.")
+        t("ai_ask", "Ask about selected PDFs", "Search the chosen PDFs locally or use a text selection. First preview with user_confirmed omitted, then tell the user which text, question and optional previous turn can be sent to the shown provider. After consent, repeat with user_confirmed true and the previewed endpoint and model. With documents, selection or OCR, also echo scope_token as confirmed_scope. OCR runs locally. Vision sends the selected image to a loopback llama.cpp model. Provider charges may apply.")
             .cmd("ai.ask")
             .with(schema(json!({ "doc": doc(), "question": { "type": "string", "minLength": 1 },
                 "documents": {"type":"array", "minItems":1, "maxItems": pdfcraft_engine::ai_ask::MAX_DOCUMENTS,
                     "items":schema(json!({"doc":doc(),"first_page":{"type":"integer","minimum":1},"last_page":{"type":"integer","minimum":1}}), &["doc"]),
                     "description":"Open PDFs with optional 1-based page ranges. Omit doc, selection and top-level page bounds."},
                 "selection": schema(json!({"page":{"type":"integer","minimum":1},"rect":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"[x0,y0,x1,y1] in points from the top-left of the displayed page."}}), &["page", "rect"]),
+                "ocr_language": {"type":"string", "description":"Source language code (e.g. en). Enables local OCR for scanned pages or the selected rectangle."},
+                "ocr_engine": {"enum":["auto","ocrs","tesseract"]}, "vision": {"type":"boolean", "description":"Include the selected image. Requires a selection, OCR and a local vision-capable llama.cpp profile."},
                 "previous_question": { "type": "string" }, "previous_answer": { "type": "string" },
                 "provider": { "type": "string" }, "first_page": { "type": "integer", "minimum": 1 }, "last_page": { "type": "integer", "minimum": 1 },
                 "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" },
@@ -280,12 +282,14 @@ pub fn tools() -> Vec<ToolDef> {
                 "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" }
             }), &["doc", "first_page", "last_page"])),
         #[cfg(target_os = "macos")]
-        t("ai_translate", "Translate PDF text", "Translate the selected page text into a target language. First preview with user_confirmed omitted and ask the user before sending. After consent, repeat with user_confirmed true and the previewed endpoint and model. Returns text and may incur provider charges.")
+        t("ai_translate", "Translate PDF text", "Translate selected pages or a rectangle. Set ocr_language for local scan recognition and to get recognized source text with page locations. First preview with user_confirmed omitted and ask the user before sending. After consent, repeat with user_confirmed true and the previewed endpoint and model. For OCR also echo scope_token as confirmed_scope. Provider charges may apply.")
             .cmd("ai.translate")
             .with(schema(json!({ "doc": doc(), "provider": { "type": "string", "description": "Saved profile name (default: the active provider)." },
                 "target_language": { "type": "string", "minLength": 1 }, "first_page": { "type": "integer", "minimum": 1 }, "last_page": { "type": "integer", "minimum": 1 },
+                "selection": schema(json!({"page":{"type":"integer","minimum":1},"rect":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"[x0,y0,x1,y1] in displayed page points. With OCR, replaces first_page and last_page."}}), &["page", "rect"]),
+                "ocr_language": {"type":"string"}, "ocr_engine": {"enum":["auto","ocrs","tesseract"]}, "confirmed_scope": {"type":"string"},
                 "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" }
-            }), &["doc", "first_page", "last_page", "target_language"])),
+            }), &["doc", "target_language"])),
         t("text_word_count", "Word count", "Count Unicode words and characters on selected pages (default all), with totals and per-page counts. Table/code exclusions use PDF structure tags, not visual guesses; unclassified text is retained. Image exclusion removes Figure-tagged and invisible/OCR text. Does not run OCR. Copy permission is required. Fails rather than returning a partial total when a page cannot be read.")
             .ro()
             .cmd("file.word_count")

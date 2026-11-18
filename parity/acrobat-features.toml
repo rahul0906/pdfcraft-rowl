@@ -7475,8 +7475,8 @@ milestone = "M13"
 status = "partial"
 commands = ["ai.translate"]
 tools = ["ai_translate"]
-evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_translate_sends_the_target_language_and_only_confirmed_pages"]
-notes = "macOS translation of selected page text through the configured provider; result is copyable text."
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_translate_sends_the_target_language_and_only_confirmed_pages", "apps/pdfcraft-cli/tests/it/text.rs::ai_scanned_pdf_asks_and_translates_with_local_ocr_without_editing", "crates/ui-egui/src/ai_chat_ui.rs::ai_ocr_controls_follow_the_selected_area_and_action"]
+notes = "macOS translation of selected pages or a figure region through the configured provider, with opt-in local OCR and source passages."
 
 [[feature]]
 id = "create.cloud-office-conversion"
@@ -9858,8 +9858,8 @@ milestone = "M13"
 status = "partial"
 commands = ["ai.ask"]
 tools = ["ai_ask"]
-evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_ask_retrieves_follow_up_context_and_validates_citations", "apps/pdfcraft-cli/tests/it/text.rs::ai_ask_across_selected_pdfs_binds_scope_and_cites_each_file", "apps/pdfcraft-cli/tests/it/text.rs::ai_ask_text_selection_sends_only_the_selected_text", "crates/ui-egui/src/ai_chat_ui.rs::ask_picks_open_pdfs_and_highlights_the_cited_same_named_tab", "crates/ui-egui/tests/it/comments.rs::ai_ask_from_the_selection_bar_opens_with_selected_text_scope"]
-notes = "macOS document chat with local keyword retrieval across chosen PDFs or a text selection, scoped follow-up turns, local transcripts and passage citations."
+evidence = ["apps/pdfcraft-cli/tests/it/text.rs::ai_ask_retrieves_follow_up_context_and_validates_citations", "apps/pdfcraft-cli/tests/it/text.rs::ai_ask_across_selected_pdfs_binds_scope_and_cites_each_file", "apps/pdfcraft-cli/tests/it/text.rs::ai_ask_text_selection_sends_only_the_selected_text", "crates/ui-egui/src/ai_chat_ui.rs::ask_picks_open_pdfs_and_highlights_the_cited_same_named_tab", "crates/ui-egui/tests/it/comments.rs::ai_ask_from_the_selection_bar_opens_with_selected_text_scope", "apps/pdfcraft-cli/tests/it/text.rs::ai_scanned_pdf_asks_and_translates_with_local_ocr_without_editing", "apps/pdfcraft-cli/tests/it/text.rs::ai_figure_sends_only_the_confirmed_crop_to_local_vision", "crates/engine/src/ai_ocr.rs::ai_ocr_keeps_words_columns_boxes_and_confidence"]
+notes = "macOS document chat across selected PDFs, with opt-in local OCR, passage citations, and cropped figure questions with a local llama.cpp vision model."
 
 [[feature]]
 id = "misc.ai-conversational-edit"

@@ -20,6 +20,8 @@ Extend the existing local passage retrieval to carry document, revision, page, a
 
 ## 2. Ask and translate scanned PDFs with local OCR
 
+Available on macOS. [Usage and regression commands](development.md#ai-assistant-on-macos)
+
 Offer to recognize text when a reader asks about or translates a scanned page. Use PdfCraft's existing local OCR engines for the requested page range or region. Reuse native text where available and keep recognized text and word boxes in a temporary cache tied to the document revision. Show translations beside the source and link answers back to the recognized words. Prioritize multi-column papers, captions, and magazine layouts.
 
 Add region selection for photos, figures, and graphs. For example, the reader could drag around a chart and ask which series rises fastest or request a translation of the labels. Use OCR for readable labels and captions. When a compatible local vision model is configured, pass it the selected crop for questions about lines, bars, and spatial relationships. Report which details the available evidence could support, especially when labels are blurry or absent.

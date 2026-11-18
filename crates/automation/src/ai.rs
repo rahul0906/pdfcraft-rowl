@@ -1,4 +1,5 @@
-use pdfcraft_engine::{ai_ask, ai_summary::SummarySource};
+use base64::Engine as _;
+use pdfcraft_engine::{ai_ask, ai_ocr, ai_summary::SummarySource};
 use pdfcraft_platform::{
     ai,
     ai_chat::{self, Citation, CitationLocation, SourceInfo, Task, Turn},
@@ -28,7 +29,15 @@ impl Automation {
         let language = if translate { Some(ai::translation_language(a.str("target_language")?).map_err(ToolError::InvalidArgs)?) } else { None };
         let doc = self.doc_to_copy(a)?;
         let page = |key| usize::try_from(a.int(key)?).map_err(|_| ToolError::InvalidArgs("Page numbers must be positive.".into()));
-        let (first, last) = (page("first_page")?, page("last_page")?);
+        let ocr = if translate { scan_options(a)? } else { None };
+        let region = if translate { a.get("selection").map(parse_selection).transpose()? } else { None };
+        let (first, last, rect) = match region {
+            Some(ai_ask::Selection::Rect { page, rect }) if ocr.is_some() && a.get("first_page").is_none() && a.get("last_page").is_none() => {
+                (page, page, Some(rect))
+            }
+            Some(_) => return Err(ToolError::InvalidArgs("Use a selection with ocr_language and omit the page range.".into())),
+            None => (page("first_page")?, page("last_page")?, None),
+        };
         let source =
             if translate { SummarySource::for_translation(doc, first, last) } else { SummarySource::new(doc, first, last) }.map_err(failed)?;
         let providers = ai::load().map_err(failed)?;
@@ -41,12 +50,25 @@ impl Automation {
         if let Some(language) = language {
             result["target_language"] = json!(language);
         }
+        if let Some(options) = &ocr {
+            let revision = SourceInfo::new(doc.id.0, doc.name.clone(), doc.path.as_deref(), ai_ask::revision_parts(doc));
+            add_scan_preview(&mut result, options, a.get("selection"), &json!(revision));
+        }
         if !confirmed(a, endpoint.as_str(), &profile.model)? {
             return Ok(result);
         }
         if let Some(language) = language {
-            let text = source.extract_for_translation().map_err(failed)?;
-            result["translation"] = json!(ai::translate(profile, language, &text).map_err(failed)?);
+            if let Some(options) = &ocr {
+                confirm_scan_scope(a, &result)?;
+                let scan = source.translation_with_ocr(options, rect, || false).map_err(failed)?;
+                result["source_passages"] =
+                    json!(scan.passages.iter().map(|(page, text, rects)| json!({"page":page,"text":text,"rects":rects})).collect::<Vec<_>>());
+                result["ocr_report"] = scan_report(&scan.report);
+                result["translation"] = json!(ai::translate(profile, language, &scan.input).map_err(failed)?);
+            } else {
+                let text = source.extract_for_translation().map_err(failed)?;
+                result["translation"] = json!(ai::translate(profile, language, &text).map_err(failed)?);
+            }
         } else {
             let text = source.extract().map_err(failed)?;
             result["summary"] = json!(ai::summarize(profile, &text).map_err(failed)?);
@@ -54,6 +76,46 @@ impl Automation {
         result["sent"] = json!(true);
         Ok(result)
     }
+}
+
+fn scan_options(a: &Args) -> Result<Option<ai_ocr::Options>> {
+    let language = a.opt_str("ocr_language")?;
+    let engine = a.opt_str("ocr_engine")?;
+    let Some(language) = language else {
+        return if engine.is_none() { Ok(None) } else { Err(Args::missing("ocr_language")) };
+    };
+    use pdfcraft_engine::ocr::EngineChoice;
+    if !ai_ocr::LANGUAGES.iter().any(|(code, _)| *code == language) {
+        return Err(Args::wrong("ocr_language", "a supported OCR language code"));
+    }
+    let engine = match engine.unwrap_or("auto") {
+        "auto" => EngineChoice::Auto,
+        "ocrs" => EngineChoice::Ocrs,
+        "tesseract" => EngineChoice::Tesseract,
+        _ => return Err(Args::wrong("ocr_engine", "auto, ocrs or tesseract")),
+    };
+    Ok(Some(ai_ocr::Options { language: language.into(), engine }))
+}
+
+fn scan_report(report: &ai_ocr::Report) -> Value {
+    json!({"pages_read":report.pages_read,"low_confidence_words":report.low_confidence_words})
+}
+
+fn add_scan_preview(result: &mut Value, options: &ai_ocr::Options, selection: Option<&Value>, revision: &Value) {
+    result["ocr_language"] = json!(options.language);
+    result["ocr_engine"] = json!(options.engine.name());
+    if let Some(selection) = selection {
+        result["selection"] = selection.clone();
+    }
+    let fingerprint = json!({"request":result,"revision":revision});
+    result["scope_token"] = json!(ai_chat::revision_id(fingerprint.to_string().as_bytes()));
+}
+
+fn confirm_scan_scope(a: &Args, result: &Value) -> Result<()> {
+    if a.opt_str("confirmed_scope")? != result["scope_token"].as_str() {
+        return Err(failed("Confirm the scope token from the preview. Preview again if the selected PDFs, pages or revision changed."));
+    }
+    Ok(())
 }
 
 fn confirmed(a: &Args, endpoint: &str, model: &str) -> Result<bool> {
@@ -75,6 +137,11 @@ impl Automation {
             return Err(ToolError::InvalidArgs("Enter a question and keep each conversation field within 4096 bytes.".into()));
         }
         let selected = a.get("selection").map(parse_selection).transpose()?;
+        let ocr = scan_options(a)?;
+        let vision = a.opt_bool("vision")?.unwrap_or(false);
+        if vision && (selected.is_none() || ocr.is_none()) {
+            return Err(ToolError::InvalidArgs("Vision requires a figure selection and ocr_language.".into()));
+        }
         if selected.is_some() && !(previous.is_empty() && answer.is_empty()) {
             return Err(ToolError::InvalidArgs("For a selection-only question, omit previous conversation fields.".into()));
         }
@@ -85,7 +152,7 @@ impl Automation {
                 "Choose documents with optional per-file ranges, or use doc with a page range or text selection.".into(),
             ));
         }
-        let detailed = documents.is_some() || selected.is_some();
+        let detailed = documents.is_some() || selected.is_some() || ocr.is_some();
         let sources = if let Some(documents) = documents {
             let docs = documents
                 .as_array()
@@ -138,11 +205,19 @@ impl Automation {
                 })
                 .collect();
             let selection = a.get("selection");
-            let fingerprint = json!({ "documents": documents, "identities": info, "selection": selection });
+            let fingerprint = json!({ "documents": documents, "identities": info, "selection": selection,
+                "ocr":ocr.as_ref().map(|o| (&o.language,o.engine.name())),"vision":vision });
             result["scope_token"] = json!(ai_chat::revision_id(fingerprint.to_string().as_bytes()));
             result["documents"] = json!(documents);
             if let Some(selection) = selection {
                 result["selection"] = selection.clone();
+            }
+            if let Some(ocr) = &ocr {
+                result["ocr_language"] = json!(ocr.language);
+                result["ocr_engine"] = json!(ocr.engine.name());
+            }
+            if vision {
+                result["vision"] = json!(true);
             }
         } else {
             result["first_page"] = json!(scope.0);
@@ -151,10 +226,40 @@ impl Automation {
         if !confirmed(a, endpoint.as_str(), &profile.model)? {
             return Ok(result);
         }
-        if detailed && a.opt_str("confirmed_scope")? != result["scope_token"].as_str() {
-            return Err(failed("Confirm the scope token from the preview. Preview again if the selected PDFs, pages or revision changed."));
+        if detailed {
+            confirm_scan_scope(a, &result)?;
         }
-        let index = ai_ask::Index::build(sources, || false).map_err(failed)?;
+        if let (true, Some(ai_ask::Selection::Rect { page, rect }), Some(options)) = (vision, selected, &ocr) {
+            if !profile.is_llama_cpp() {
+                return Err(failed("Choose a local llama.cpp vision profile to include the image."));
+            }
+            let doc = self.doc_to_copy(a)?;
+            let source = SummarySource::new(doc, page, page).map_err(failed)?;
+            let png = source.clone().figure_png(rect).map_err(failed)?;
+            let (labels, notice) = match source.translation_with_ocr(options, Some(rect), || false) {
+                Ok(scan) => {
+                    result["ocr_report"] = scan_report(&scan.report);
+                    (scan.input, None)
+                }
+                Err(error) => (String::new(), Some(error)),
+            };
+            result["answer"] =
+                json!(ai::ask_figure(profile, question, &labels, &base64::engine::general_purpose::STANDARD.encode(png)).map_err(failed)?);
+            result["sent"] = json!(true);
+            result["citations"] = json!([Citation {
+                page,
+                excerpt: labels,
+                location: info.first().and_then(Option::as_ref).cloned().map(|source| CitationLocation { source, rects: vec![rect] })
+            }]);
+            if let Some(notice) = notice {
+                result["ocr_notice"] = json!(notice);
+            }
+            return Ok(result);
+        }
+        let index = ai_ask::Index::build_with_ocr(sources, ocr.as_ref(), || false).map_err(failed)?;
+        if ocr.is_some() {
+            result["ocr_report"] = scan_report(&index.ocr_report);
+        }
         let hits: Vec<_> = if selected.is_some() { index.selection().collect() } else { index.search(question, Some(previous)) };
         let sources: Vec<_> = hits
             .into_iter()
@@ -173,7 +278,15 @@ impl Automation {
         let history = if previous.is_empty() {
             Vec::new()
         } else {
-            vec![Turn { task: Task::Ask, question: previous.into(), answer: answer.into(), citations: Vec::new(), scope, ask_scope: None }]
+            vec![Turn {
+                task: Task::Ask,
+                question: previous.into(),
+                answer: answer.into(),
+                citations: Vec::new(),
+                scope,
+                ask_scope: None,
+                notice: None,
+            }]
         };
         let turn = ai_chat::ask(profile, question, &history, sources).map_err(failed)?;
         result["sent"] = json!(sent);

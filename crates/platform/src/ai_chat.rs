@@ -68,6 +68,8 @@ pub struct Turn {
     pub scope: (usize, usize),
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 pub fn ask(profile: &Profile, question: &str, history: &[Turn], sources: Vec<Citation>) -> Result<Turn, String> {
@@ -82,6 +84,7 @@ pub fn ask(profile: &Profile, question: &str, history: &[Turn], sources: Vec<Cit
             citations: Vec::new(),
             scope: (0, 0),
             ask_scope: None,
+            notice: None,
         });
     }
     let recent: Vec<_> = history
@@ -154,7 +157,7 @@ pub fn ask(profile: &Profile, question: &str, history: &[Turn], sources: Vec<Cit
     if citations.is_empty() {
         display = "I couldn’t verify an answer from the selected pages.".into();
     }
-    Ok(Turn { task: Task::Ask, question: question.into(), answer: display, citations, scope: (0, 0), ask_scope: None })
+    Ok(Turn { task: Task::Ask, question: question.into(), answer: display, citations, scope: (0, 0), ask_scope: None, notice: None })
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -269,7 +272,15 @@ mod tests {
         let path = dir.path().join("chat.json");
         let first = revision_id(b"original");
         let edited = revision_id(b"updated");
-        let turn = Turn { task: Task::Ask, question: "Where?".into(), answer: "Here.".into(), citations: Vec::new(), scope: (1, 3), ask_scope: None };
+        let turn = Turn {
+            task: Task::Ask,
+            question: "Where?".into(),
+            answer: "Here.".into(),
+            citations: Vec::new(),
+            scope: (1, 3),
+            ask_scope: None,
+            notice: None,
+        };
         assert!(!read(&path).unwrap().enabled);
         save_at(&path, true, Some((&first, &[turn]))).unwrap();
         let reopened = read(&path).unwrap();
@@ -283,6 +294,7 @@ mod tests {
             citations: Vec::new(),
             scope: (2, 2),
             ask_scope: None,
+            notice: None,
         };
         save_at(&path, true, Some((&edited, &[summary]))).unwrap();
         save_at(&path, false, None).unwrap();

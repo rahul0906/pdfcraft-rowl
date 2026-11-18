@@ -3003,6 +3003,14 @@ fn finish_sign_requests(app: &mut PdfCraftApp, index: usize, mut tool: QuickTool
         match choice {
             crate::zoom_snap::AreaChoice::Print => app.open_print_area(page, area),
             crate::zoom_snap::AreaChoice::Save => app.save_snapshot_image(index, page, area),
+            #[cfg(target_os = "macos")]
+            crate::zoom_snap::AreaChoice::AskArea => {
+                crate::ai_chat_ui::open_region(app, index, page + 1, area, pdfcraft_platform::ai_chat::Task::Ask);
+            }
+            #[cfg(target_os = "macos")]
+            crate::zoom_snap::AreaChoice::TranslateArea => {
+                crate::ai_chat_ui::open_region(app, index, page + 1, area, pdfcraft_platform::ai_chat::Task::Translate);
+            }
         }
     }
     // A signature rectangle was drawn, or an empty signature field clicked.

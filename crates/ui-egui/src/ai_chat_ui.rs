@@ -6,9 +6,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use base64::Engine as _;
 use pdfcraft_engine::{
-    DocId, Document, Session, ai_ask,
+    DocId, Document, Session, ai_ask, ai_ocr,
     ai_summary::{self, SummarySource},
+    ocr::EngineChoice,
 };
 use pdfcraft_platform::{
     ai,
@@ -52,6 +54,11 @@ pub(crate) struct Chat {
     ask_pages: (usize, usize),
     ask_documents: Option<Vec<(DocId, (usize, usize))>>,
     selection: Option<(ai_ask::Selection, ai_ask::Stamp)>,
+    figure: bool,
+    vision: bool,
+    scan_text: bool,
+    ocr_language: &'static str,
+    ocr_engine: EngineChoice,
     summary_pages: (usize, usize),
     translation_pages: (usize, usize),
     language: Option<&'static str>,
@@ -96,6 +103,11 @@ impl Chat {
             ask_pages: (1, doc.info.pages.len()),
             ask_documents: None,
             selection: None,
+            figure: false,
+            vision: false,
+            scan_text: false,
+            ocr_language: "en",
+            ocr_engine: EngineChoice::Auto,
             summary_pages: (1, doc.info.pages.len().min(ai_summary::MAX_PAGES)),
             translation_pages: (current_page, current_page),
             language: None,
@@ -170,6 +182,23 @@ impl Chat {
         doc.edit_generation() == self.generation && doc.path == self.path
     }
 
+    fn ocr_options(&self) -> Option<ai_ocr::Options> {
+        (self.scan_text || self.figure).then(|| ai_ocr::Options { language: self.ocr_language.into(), engine: self.ocr_engine })
+    }
+
+    fn figure_selection(&self) -> Option<(usize, [f32; 4])> {
+        match self.selection {
+            Some((ai_ask::Selection::Rect { page, rect }, _)) if self.figure => Some((page, rect)),
+            _ => None,
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection = None;
+        self.figure = false;
+        self.vision = false;
+    }
+
     fn send(&mut self, doc: &Document, session: &Session, ctx: &egui::Context) -> Result<(), String> {
         let latest = provider()?;
         let shown = self.destination.as_ref().map_err(Clone::clone)?;
@@ -181,17 +210,29 @@ impl Chat {
             return self.send_ask(doc, session, latest, ctx);
         }
         let task = self.task;
-        let scope = *self.pages_mut();
+        let region = (task == Task::Translate).then(|| self.figure_selection()).flatten();
+        let scope = region.map(|(page, _)| (page, page)).unwrap_or_else(|| *self.pages_mut());
+        if region.is_some() && !self.selection.as_ref().is_some_and(|(_, stamp)| stamp.matches(doc)) {
+            return Err("The selected area changed. Select it again.".into());
+        }
         let source = match task {
             Task::Ask => return Err("Choose an AI action.".into()),
             Task::Summarize => SummarySource::new(doc, scope.0, scope.1)?,
             Task::Translate => SummarySource::for_translation(doc, scope.0, scope.1)?,
         };
+        let scan = (task == Task::Translate).then(|| self.ocr_options()).flatten().map(|options| {
+            let info = SourceInfo::new(doc.id.0, ai_ask::document_label(doc, session), doc.path.as_deref(), ai_ask::revision_parts(doc));
+            (options, info)
+        });
         let language = self.language;
         let page_range = format!("{}–{}", scope.0, scope.1);
         let question = match task {
             Task::Ask => return Err("Choose an AI action.".into()),
             Task::Summarize => crate::i18n::fmt(tl!("Summarize pages {pages}"), &[("pages", &page_range)]),
+            Task::Translate if region.is_some() => {
+                let target = language.ok_or("Choose a target language.")?;
+                crate::i18n::fmt(tl!("Translate the selected area to {language}"), &[("language", tl!(target))])
+            }
             Task::Translate => {
                 let target = language.ok_or("Choose a target language.")?;
                 crate::i18n::fmt(tl!("Translate pages {pages} to {language}"), &[("pages", &page_range), ("language", tl!(target))])
@@ -200,22 +241,36 @@ impl Chat {
         self.stop = Arc::default();
         let stop = self.stop.clone();
         let prompt = question.clone();
+        let job_sources = vec![ai_ask::stamp(doc)];
         self.job = Some(start(ctx, move || {
             let check_stop = || {
                 if stop.load(Ordering::Relaxed) { Err("Request stopped.".to_owned()) } else { Ok(()) }
             };
             check_stop()?;
+            let mut citations = Vec::new();
+            let mut notice = None;
             let answer = if task == Task::Summarize {
                 let text = source.extract()?;
                 check_stop()?;
                 ai::summarize(&latest, &text)?
+            } else if let Some((options, info)) = scan {
+                let scan = source.translation_with_ocr(&options, region.map(|(_, rect)| rect), || stop.load(Ordering::Relaxed))?;
+                notice = scan.report.notice();
+                citations = scan
+                    .passages
+                    .into_iter()
+                    .map(|(page, excerpt, rects)| Citation { page, excerpt, location: Some(CitationLocation { source: info.clone(), rects }) })
+                    .collect();
+                check_stop()?;
+                ai::translate(&latest, language.ok_or("Choose a target language.")?, &scan.input)?
             } else {
                 let text = source.extract_for_translation()?;
                 check_stop()?;
                 ai::translate(&latest, language.ok_or("Choose a target language.")?, &text)?
             };
-            Ok((None, Turn { task, question, answer, citations: Vec::new(), scope, ask_scope: None }))
+            Ok((None, Turn { task, question, answer, citations, scope, ask_scope: None, notice }))
         })?);
+        self.job_sources = job_sources;
         self.pending = Some(prompt);
         Ok(())
     }
@@ -247,6 +302,15 @@ impl Chat {
         let (documents, sources): (Vec<_>, Vec<_>) =
             input.into_iter().map(|(doc, source)| ((ai_ask::document_label(doc, session), doc.path.clone()), source)).unzip();
         ai_ask::validate_scope(&sources)?;
+        let ocr = self.ocr_options();
+        let vision = if let Some((page, rect)) = self.figure_selection().filter(|_| self.vision) {
+            if !profile.is_llama_cpp() {
+                return Err("Choose a local llama.cpp vision profile to include the image.".into());
+            }
+            Some((page, rect, SummarySource::new(doc, page, page)?))
+        } else {
+            None
+        };
         let cached = self.index.clone();
         let history = if selected { Vec::new() } else { self.turns.clone() };
         self.stop = Arc::default();
@@ -261,20 +325,40 @@ impl Chat {
                     (SourceInfo::new(source.doc.0, name, path.as_deref(), source.revision_parts()), source.pages(), source.selection())
                 })
                 .collect();
-            let scope_key = ai_chat::revision_id(format!("{evidence:?}").as_bytes());
+            if let Some((page, rect, snapshot)) = vision {
+                let options = ocr.as_ref().ok_or("Choose the source language for OCR.")?;
+                let (source, _, _) = evidence.first().ok_or("Select an area on a PDF page.")?;
+                let png = snapshot.clone().figure_png(rect)?;
+                let (labels, notice) = match snapshot.translation_with_ocr(options, Some(rect), || stop.load(Ordering::Relaxed)) {
+                    Ok(scan) => (scan.input, scan.report.notice()),
+                    Err(error) => (String::new(), Some(error)),
+                };
+                if stop.load(Ordering::Relaxed) {
+                    return Err("Request stopped.".into());
+                }
+                let answer = ai::ask_figure(&profile, &question, &labels, &base64::engine::general_purpose::STANDARD.encode(png))?;
+                let citation = Citation { page, excerpt: labels, location: Some(CitationLocation { source: source.clone(), rects: vec![rect] }) };
+                return Ok((None, Turn { task: Task::Ask, question, answer, citations: vec![citation], scope: (0, 0), ask_scope: None, notice }));
+            }
+            let scope_key = if ocr.is_some() {
+                ai_chat::revision_id(format!("{evidence:?}{ocr:?}").as_bytes())
+            } else {
+                ai_chat::revision_id(format!("{evidence:?}").as_bytes())
+            };
             let mut turns: Vec<_> = history
                 .into_iter()
                 .rev()
                 .filter(|turn| {
                     turn.task == Task::Ask
-                        && (turn.ask_scope.as_ref() == Some(&scope_key) || (turn.ask_scope.is_none() && current_scope == Some(turn.scope)))
+                        && (turn.ask_scope.as_ref() == Some(&scope_key)
+                            || (ocr.is_none() && turn.ask_scope.is_none() && current_scope == Some(turn.scope)))
                 })
                 .take(4)
                 .collect();
             turns.reverse();
             let index = match cached {
                 Some((key, index)) if key == scope_key => index,
-                _ => Arc::new(ai_ask::Index::build(sources, || stop.load(Ordering::Relaxed))?),
+                _ => Arc::new(ai_ask::Index::build_with_ocr(sources, ocr.as_ref(), || stop.load(Ordering::Relaxed))?),
             };
             let hits: Vec<_> =
                 if selected { index.selection().collect() } else { index.search(&question, turns.last().map(|turn| turn.question.as_str())) };
@@ -293,6 +377,7 @@ impl Chat {
                 return Err("Request stopped.".into());
             }
             let mut turn = ai_chat::ask(&profile, &question, &turns, citations)?;
+            turn.notice = index.ocr_report.notice();
             turn.scope = current_scope.unwrap_or_default();
             turn.ask_scope = Some(scope_key.clone());
             Ok((Some((scope_key, index)), turn))
@@ -313,19 +398,32 @@ pub(crate) fn open(app: &mut PdfCraftApp, task: Task) {
     let current_page = app.views.get(view).map_or(1, |view| view.current.saturating_add(1));
     let chat = chat_for(&mut app.ai_chats, doc, current_page);
     chat.task = task;
+    if chat.figure {
+        chat.clear_selection();
+    }
     chat.destination = provider();
     app.ai_chat_anchor = None;
     app.choose_right_panel(Some(RightPanel::AiChat));
 }
 
 pub(crate) fn open_selection(app: &mut PdfCraftApp, view: usize, selection: ai_ask::Selection) {
+    open_scope(app, view, selection, Task::Ask, false);
+}
+
+pub(crate) fn open_region(app: &mut PdfCraftApp, view: usize, page: usize, rect: [f32; 4], task: Task) {
+    open_scope(app, view, ai_ask::Selection::Rect { page, rect }, task, true);
+}
+
+fn open_scope(app: &mut PdfCraftApp, view: usize, selection: ai_ask::Selection, task: Task, figure: bool) {
     let Some(view_id) = app.views.get(view).map(|view| view.id) else { return };
     let Some(doc) = app.session.get(view_id) else { return };
     let chat = chat_for(&mut app.ai_chats, doc, app.views.get(view).map_or(1, |view| view.current.saturating_add(1)));
     if chat.job.is_some() {
         chat.error = Some("Stop the current request before asking about a selection.".into());
     } else {
-        chat.task = Task::Ask;
+        chat.task = task;
+        chat.figure = figure;
+        chat.vision = false;
         chat.destination = provider();
         chat.selection = Some((selection, ai_ask::stamp(doc)));
         chat.archive = None;
@@ -513,7 +611,7 @@ fn ask_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessi
     let choose = ui.button(tl!("Choose PDFs…"));
     egui::Popup::menu(&choose).show(|ui| {
         if ui.button(tl!("Use current PDF")).clicked() {
-            chat.selection = None;
+            chat.clear_selection();
             chat.ask_documents = None;
             ui.close();
         }
@@ -551,14 +649,15 @@ fn ask_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessi
             changed = true;
         }
         if changed {
-            chat.selection = None;
+            chat.clear_selection();
             chat.ask_documents = Some(chosen);
             chat.error = None;
         }
     });
     if chat.selection.is_some() {
         let name = ai_ask::document_label(doc, session);
-        ui.label(crate::i18n::fmt(tl!("Selected text in {name}"), &[("name", &name)]));
+        let label = if chat.figure { tl!("Selected area in {name}") } else { tl!("Selected text in {name}") };
+        ui.label(crate::i18n::fmt(label, &[("name", &name)]));
     } else if let Some(chosen) = &chat.ask_documents {
         if chosen.is_empty() {
             ui.label(tl!("Choose at least one PDF."));
@@ -577,6 +676,40 @@ fn ask_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessi
     }
 }
 
+fn scan_controls(ui: &mut egui::Ui, chat: &mut Chat) {
+    if !chat.figure {
+        ui.add(crate::widgets::checkbox(&mut chat.scan_text, tl!("Recognize scanned text locally")));
+        if !chat.scan_text {
+            return;
+        }
+    }
+    let language_name = ai_ocr::LANGUAGES.iter().find(|(code, _)| *code == chat.ocr_language).map_or(chat.ocr_language, |(_, name)| *name);
+    let label = ui.label(tl!("OCR source language"));
+    ui.horizontal_wrapped(|ui| {
+        craft_ui::ComboBox::from_id_salt("ai-ocr-language")
+            .selected_text(tl!(language_name))
+            .show_ui(ui, |ui| {
+                for &(code, name) in ai_ocr::LANGUAGES {
+                    if ui.selectable_value(&mut chat.ocr_language, code, tl!(name)).clicked() {
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .labelled_by(label.id);
+        craft_ui::ComboBox::from_id_salt("ai-ocr-engine").selected_text(tl!(chat.ocr_engine.name())).show_ui(ui, |ui| {
+            for engine in [EngineChoice::Auto, EngineChoice::Ocrs, EngineChoice::Tesseract] {
+                if ui.selectable_value(&mut chat.ocr_engine, engine, tl!(engine.name())).clicked() {
+                    ui.close();
+                }
+            }
+        });
+    });
+    if chat.figure && chat.task == Task::Ask && chat.destination.as_ref().is_ok_and(ai::Profile::is_llama_cpp) {
+        ui.add(crate::widgets::checkbox(&mut chat.vision, tl!("Include image for local vision")));
+    }
+}
+
 fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session, t: &theme::Tokens) -> bool {
     let can_edit = chat.job.is_none() && !chat.confirm_new;
     let frame = egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(10).inner_margin(9.0);
@@ -589,7 +722,16 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessio
                 if chat.task == Task::Ask {
                     ask_scope(ui, chat, doc, session);
                 }
-                if chat.task != Task::Ask || (chat.selection.is_none() && chat.ask_documents.is_none()) {
+                if chat.task == Task::Translate
+                    && let Some((page, _)) = chat.figure_selection()
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("{} · {page}", tl!("Selected area")));
+                        if ui.button(tl!("Use page range")).clicked() {
+                            chat.clear_selection();
+                        }
+                    });
+                } else if chat.task != Task::Ask || (chat.selection.is_none() && chat.ask_documents.is_none()) {
                     let count = doc.info.pages.len().max(1);
                     let (first, last) = chat.pages_mut();
                     ui.horizontal_wrapped(|ui| {
@@ -598,6 +740,9 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessio
                         let label = ui.label(tl!("To page"));
                         ui.add(egui::DragValue::new(last).range(1..=count)).labelled_by(label.id);
                     });
+                }
+                if chat.task != Task::Summarize {
+                    scan_controls(ui, chat);
                 }
                 match chat.task {
                     Task::Ask => {
@@ -680,6 +825,10 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessio
             });
             let disclosure = match &chat.destination {
                 Err(error) => error.as_str(),
+                Ok(_) if chat.task == Task::Ask && chat.figure && chat.vision => {
+                    tl!("Sends the selected image and any OCR labels to the local model.")
+                }
+                Ok(_) if chat.figure && chat.task != Task::Summarize => tl!("Runs OCR on this device and sends text from the selected area."),
                 Ok(_) if chat.task == Task::Ask && chat.selection.is_some() => tl!("Sends your question and the selected text."),
                 Ok(_) if chat.task == Task::Ask => tl!("Sends your question, matching excerpts, and recent turns for this scope."),
                 Ok(_) => tl!("Sends text from the selected pages."),
@@ -711,6 +860,17 @@ fn conversation(ui: &mut egui::Ui, chat: &Chat, doc: &Document, nav: &mut Option
             prompt_bubble(ui, &turn.question, t);
             ui.add_space(8.0);
             ui.label(&turn.answer);
+            if let Some(notice) = &turn.notice {
+                ui.label(egui::RichText::new(notice).small().color(t.text_muted));
+            }
+            if turn.task == Task::Translate && !turn.citations.is_empty() {
+                egui::CollapsingHeader::new(tl!("Source text")).id_salt(index).show(ui, |ui| {
+                    for cite in &turn.citations {
+                        ui.label(format!("{} {}", tl!("Page"), cite.page));
+                        ui.label(&cite.excerpt);
+                    }
+                });
+            }
             ui.horizontal_wrapped(|ui| {
                 let copy_id = ui.make_persistent_id(("copy-answer", &chat.revision, &chat.archive, index, &turn.question));
                 copy_answer(ui, copy_id, &turn.answer, t);
@@ -844,6 +1004,7 @@ mod tests {
                 citations: vec![Citation { page: 2, excerpt: "Two".into(), location: None }],
                 scope: (1, 2),
                 ask_scope: None,
+                notice: None,
             });
             app.ai_chats.insert(id, chat);
             app
@@ -899,6 +1060,38 @@ mod tests {
     }
 
     #[test]
+    fn ai_ocr_controls_follow_the_selected_area_and_action() {
+        let bytes = Session::new().create_blank(300.0, 400.0, 2).unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("figure.pdf", None, bytes.as_ref().clone()).unwrap();
+            let (view, id) = app.active_ids().unwrap();
+            open_region(&mut app, view, 2, [10.0, 20.0, 90.0, 120.0], Task::Ask);
+            app.ai_chats.get_mut(&id).unwrap().destination = Ok(ai::Profile::llama_cpp("Local".into(), ai::LLAMA_CPP_URL.into(), "vision".into()));
+            app
+        });
+        h.run_steps(4);
+        h.get_by_label("Selected area in figure.pdf");
+        h.get_by_label("OCR source language");
+        h.get_by_label("Include image for local vision").click();
+        h.run_steps(4);
+        h.get_by_label("Sends the selected image and any OCR labels to the local model.");
+        h.get_by_label("Translate").click();
+        h.run_steps(4);
+        h.get_by_label("Selected area · 2");
+        assert!(h.query_by_label("Include image for local vision").is_none());
+        h.get_by_label("Use page range").click();
+        h.run_steps(4);
+        h.get_by_label("Recognize scanned text locally").click();
+        h.run_steps(4);
+        h.get_by_label("OCR source language");
+        let (_, id) = h.state().active_ids().unwrap();
+        let chat = h.state().ai_chats.get(&id).unwrap();
+        assert!(chat.selection.is_none() && chat.scan_text && !chat.vision);
+    }
+
+    #[test]
     fn stopping_a_chat_request_discards_its_late_answer() {
         let (reply, job) = std::sync::mpsc::channel();
         let bytes = pdfcraft_engine::Session::new().create_from_text("Test", "One").unwrap();
@@ -929,6 +1122,7 @@ mod tests {
                     citations: Vec::new(),
                     scope: (1, 1),
                     ask_scope: None,
+                    notice: None,
                 },
             )))
             .unwrap_or_else(|_| panic!("Chat dropped its pending worker"));
@@ -988,6 +1182,7 @@ mod tests {
             }],
             scope: (0, 0),
             ask_scope: None,
+            notice: None,
         };
         h.state_mut().ai_chats.get_mut(&owner).unwrap().turns.push(turn);
         h.run_steps(4);
