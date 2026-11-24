@@ -37,7 +37,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         let sig_expanded = &mut app.sig_expanded;
         let a11y = &mut app.a11y;
         let tags_state = &mut app.tags_state;
-        let compare = &app.compare;
+        let compare = &mut app.compare;
         let comment_allowed = doc.allows_annotation();
         // A dialog or the palette owns the keyboard: the panel leaves Escape to it.
         let modal = app.dialog.is_some() || app.palette_open;
@@ -59,6 +59,8 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     RightPanel::Accessibility => ("Accessibility Checker", None),
                     RightPanel::Tags => ("Tags", None),
                     RightPanel::Search => ("Search", None),
+                    #[cfg(target_os = "macos")]
+                    RightPanel::AiChat => ("AI assistant", None),
                     RightPanel::Compare => ("Compare", compare.as_ref().filter(|c| c.new == id).map(|c| c.result.changes.len())),
                 };
                 // Comments count like Acrobat (no replies); the replies go in small text below.
@@ -189,6 +191,15 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     let enabled = !modal && view.panel_drag.is_none();
                     thumbnail_size(ui, &t, view, enabled);
                 }
+                #[cfg(target_os = "macos")]
+                if panel == RightPanel::AiChat {
+                    let owner = app.ai_chat_anchor.and_then(|id| app.session.get(id)).unwrap_or(doc);
+                    let page = if owner.id == doc.id { view.current.saturating_add(1) } else { 1 };
+                    if crate::ai_chat_ui::panel(ui, &t, owner, &app.session, page, &mut app.ai_chats, &mut nav) {
+                        app.dialog = Some(crate::Dialog::Preferences);
+                    }
+                    return;
+                }
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match panel {
                     RightPanel::Comments => {
                         if let Some(e) = crate::comments_panel::show(ui, &t, doc, view, prefs, comment_allowed, &mut nav) {
@@ -305,7 +316,9 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         panel_edit = edit;
                     }
                     RightPanel::Search => crate::search_ui::panel(ui, &t, view, info.pages.len()),
-                    RightPanel::Compare => compare_action = crate::compare_ui::panel(ui, &t, compare, id),
+                    #[cfg(target_os = "macos")]
+                    RightPanel::AiChat => {}
+                    RightPanel::Compare => compare_action = crate::compare_ui::panel(ui, &t, compare, id, &app.session),
                     RightPanel::Attachments => {
                         let attachable = doc.allows_modification() && doc.read_only_reason.is_none();
                         if attachable {
@@ -500,6 +513,8 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             }
             v.flash = Some((p, r, 0.0));
         }
+        #[cfg(target_os = "macos")]
+        Some(Nav::AiCitation(owner, page, location)) => crate::ai_chat_ui::reveal_citation(app, owner, page, location),
         None => {}
     }
 }

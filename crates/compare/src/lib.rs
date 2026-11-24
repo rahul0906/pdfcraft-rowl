@@ -38,6 +38,8 @@ impl Kind {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Side {
     pub text: String,
+    /// Changed words in the input to the comparison. Empty at the insertion/deletion point.
+    pub word_range: std::ops::Range<usize>,
     /// The page the change is on (for a pure insertion or deletion, where the other side's
     /// words would have been).
     pub page: usize,
@@ -226,7 +228,7 @@ fn hash(s: &str) -> u64 {
 }
 
 /// Merge word boxes on the same page and line into one rectangle per line.
-fn rects(words: &[&Word]) -> Vec<[f64; 4]> {
+fn rects(words: &[Word]) -> Vec<[f64; 4]> {
     let mut out: Vec<[f64; 4]> = Vec::new();
     for w in words {
         let r = w.rect;
@@ -243,11 +245,14 @@ fn rects(words: &[&Word]) -> Vec<[f64; 4]> {
     out
 }
 
-fn side(words: &[&Word], neighbour: Option<&Word>) -> Side {
+fn side(all: &[Word], word_range: std::ops::Range<usize>) -> Side {
+    let words = all.get(word_range.clone()).unwrap_or_default();
+    let neighbour = all.get(word_range.end).or_else(|| all.last());
     Side {
+        word_range,
         text: words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
-        page: words.first().or(neighbour.as_ref()).map_or(0, |w| w.page),
-        last_page: words.last().or(neighbour.as_ref()).map_or(0, |w| w.page),
+        page: words.first().or(neighbour).map_or(0, |w| w.page),
+        last_page: words.last().or(neighbour).map_or(0, |w| w.page),
         rects: rects(words),
         near: if words.is_empty() { neighbour.map(|w| w.rect) } else { None },
     }
@@ -270,29 +275,21 @@ pub fn compare(old: &[Word], new: &[Word]) -> Comparison {
             k += 1;
             continue;
         }
-        let (mut del, mut ins): (Vec<&Word>, Vec<&Word>) = (Vec::new(), Vec::new());
-        while k < ops.len() && ops[k] != Op::Equal {
-            match ops[k] {
-                Op::Delete => {
-                    del.push(&old[i]);
-                    i += 1;
-                }
-                _ => {
-                    ins.push(&new[j]);
-                    j += 1;
-                }
+        let (old_start, new_start) = (i, j);
+        while let Some(op) = ops.get(k).filter(|&&op| op != Op::Equal) {
+            match op {
+                Op::Delete => i += 1,
+                _ => j += 1,
             }
             k += 1;
         }
-        let kind = match (del.is_empty(), ins.is_empty()) {
+        let kind = match (old_start == i, new_start == j) {
             (false, false) => Kind::Replaced,
             (false, true) => Kind::Deleted,
             _ => Kind::Inserted,
         };
         // Where a one-sided change sits in the other document: next to the neighbouring word.
-        let old_near = old.get(i).or_else(|| old.last());
-        let new_near = new.get(j).or_else(|| new.last());
-        changes.push(Change { kind, old: side(&del, old_near), new: side(&ins, new_near) });
+        changes.push(Change { kind, old: side(old, old_start..i), new: side(new, new_start..j) });
     }
     Comparison { changes, old_words: old.len(), new_words: new.len() }
 }

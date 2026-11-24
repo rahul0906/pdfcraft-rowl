@@ -110,6 +110,7 @@ impl PdfCraftApp {
             scroll_speed: scroll_speed::ScrollSpeed::default(),
             invert_middle_drag: false,
             animation_effects: motion::AnimationEffects::default(),
+            full_screen_escape_exits: true,
             motion: motion::Motion::default(),
             language: i18n::AUTO.to_string(),
             ui_scale: None,
@@ -177,6 +178,8 @@ impl PdfCraftApp {
             open_prepare_gate: None,
             pinned: Default::default(),
             recent_check: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            reveal_errors: Default::default(),
             pinned_tools: Vec::new(),
             pin_tool_search: String::new(),
             toast: None,
@@ -185,6 +188,7 @@ impl PdfCraftApp {
             script_messages_dropped: 0,
             toast_dropped: 0,
             integrated_titlebar: false,
+            titlebar_lights_right: None,
             window_controls: None,
             system_title_bar: false,
             app_frame_shown: None,
@@ -358,6 +362,12 @@ impl PdfCraftApp {
             replace_draft: None,
             number_draft: NumberDraft { from: 1, to: 1, style: pdfcraft_engine::LabelStyle::Decimal, prefix: String::new(), start: 1 },
             word_count_draft: word_count_ui::Draft::default(),
+            #[cfg(target_os = "macos")]
+            ai_settings: Default::default(),
+            #[cfg(target_os = "macos")]
+            ai_chats: Default::default(),
+            #[cfg(target_os = "macos")]
+            ai_chat_anchor: None,
             printer_marks_draft: Default::default(),
             convert_colours_draft: Default::default(),
             hairlines_draft: Default::default(),
@@ -587,6 +597,11 @@ impl eframe::App for PdfCraftApp {
 
 impl PdfCraftApp {
     fn logic_unguarded(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        {
+            ai_chat_ui::refresh(&mut self.ai_chats, &self.session);
+            compare_ui::refresh(&mut self.compare, &self.session);
+        }
         #[cfg(test)]
         self.injected_panic(crate::frame_guard::FramePart::Logic);
         self.ctx = Some(ctx.clone());
@@ -608,6 +623,7 @@ impl PdfCraftApp {
                 worker.set_context(ctx);
             }
             self.poll_pending_opens();
+            self.show_reveal_errors();
             self.poll_pending_destinations();
         }
         self.check_restored_recent();
@@ -722,6 +738,7 @@ impl PdfCraftApp {
             let out = self.session.take_js_output(id);
             self.handle_js(id, out);
         }
+        self.script_tick(ctx);
         if let Some(mut control) = self.control.take() {
             control.tick(ctx, self);
             self.control = Some(control);

@@ -12,8 +12,16 @@ workspace = true
 log = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# `write_atomically`: a volume that refuses F_FULLFSYNC gets a plain fsync.
-rustix = { version = "1", features = ["fs"] }
+# Atomic saves use explicit xattr size queries and fall back to plain fsync if F_FULLFSYNC is refused.
+rustix = { version = "1.1.6", features = ["fs"] }
+getrandom = "0.4"
+security-framework = "3.7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11"
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier"] }
+url = "2.5"
+zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Already in the dependency graph through the accessibility integration. The portal watcher
@@ -27,3 +35,6 @@ futures-lite = "2"
 zbus = { version = "=5.19.0", default-features = false, features = ["async-io"] }
 async-channel = "2"
 futures-lite = "2"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tempfile = "3.27"

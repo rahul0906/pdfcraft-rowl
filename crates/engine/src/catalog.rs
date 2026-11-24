@@ -538,8 +538,17 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
         sections: &[ToolSection {
             title: "Bring your own model (off by default)",
             items: &[
+                #[cfg(target_os = "macos")]
+                item("Summarize", "sparkles", "ai.summary", Ready),
+                #[cfg(not(target_os = "macos"))]
                 item("Summarize", "sparkles", "ai.summary", Provider),
+                #[cfg(target_os = "macos")]
+                item("Ask about this document", "message-circle-reply", "ai.ask", Ready),
+                #[cfg(not(target_os = "macos"))]
                 item("Ask about this document", "message-circle-reply", "ai.ask", Provider),
+                #[cfg(target_os = "macos")]
+                item("Translate", "languages", "ai.translate", Ready),
+                #[cfg(not(target_os = "macos"))]
                 item("Translate", "languages", "ai.translate", Provider),
             ],
         }],

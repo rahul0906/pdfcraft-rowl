@@ -252,6 +252,44 @@ pub fn tools() -> Vec<ToolDef> {
                 "generation":{"type":"integer","minimum":0,"description":"Use generation returned by object_list to reject a stale selection."}}), &["doc","page"])),
         t("object_paste", "Paste copied objects", "Edit ▸ Paste of what object_copy copied, onto page of doc as page content that draws the same: where it was, or on the page it came from 18 points down and to the right, and 18 more for each further paste onto the same page; centred when that would leave it off the page. Resources join the page's under names that don't clash; into another document the fonts, images and other objects they use are copied (each once, sharing what is there; refused past 20,000 objects or 256 MB). Pasted content is untagged and in no layer. One undo step.")
             .with(schema(json!({"doc":doc(),"page":{"type":"integer","minimum":1}}), &["doc","page"])),
+        #[cfg(target_os = "macos")]
+        t("ai_llama_models", "List local llama.cpp models", "List model IDs from a running llama-server on this Mac. Sends no document text or prompt.")
+            .ro()
+            .with(schema(json!({
+                "base_url": {"type":"string", "description":"Loopback URL for a keyless server, default http://127.0.0.1:8080/v1. Omit when using a saved profile."},
+                "provider": {"type":"string", "description":"Use a saved llama.cpp profile, including its Keychain credential when configured."}
+            }), &[])),
+        #[cfg(target_os = "macos")]
+        t("ai_ask", "Ask about selected PDFs", "Search the chosen PDFs locally or use a text selection. First preview with user_confirmed omitted, then tell the user which text, question and optional previous turn can be sent to the shown provider. After consent, repeat with user_confirmed true and the previewed endpoint and model. With documents, selection or OCR, also echo scope_token as confirmed_scope. OCR runs locally. Vision sends the selected image to a loopback llama.cpp model. Provider charges may apply.")
+            .cmd("ai.ask")
+            .with(schema(json!({ "doc": doc(), "question": { "type": "string", "minLength": 1 },
+                "documents": {"type":"array", "minItems":1, "maxItems": pdfcraft_engine::ai_ask::MAX_DOCUMENTS,
+                    "items":schema(json!({"doc":doc(),"first_page":{"type":"integer","minimum":1},"last_page":{"type":"integer","minimum":1}}), &["doc"]),
+                    "description":"Open PDFs with optional 1-based page ranges. Omit doc, selection and top-level page bounds."},
+                "selection": schema(json!({"page":{"type":"integer","minimum":1},"rect":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"[x0,y0,x1,y1] in points from the top-left of the displayed page."}}), &["page", "rect"]),
+                "ocr_language": {"type":"string", "description":"Source language code (e.g. en). Enables local OCR for scanned pages or the selected rectangle."},
+                "ocr_engine": {"enum":["auto","ocrs","tesseract"]}, "vision": {"type":"boolean", "description":"Include the selected image. Requires a selection, OCR and a local vision-capable llama.cpp profile."},
+                "previous_question": { "type": "string" }, "previous_answer": { "type": "string" },
+                "provider": { "type": "string" }, "first_page": { "type": "integer", "minimum": 1 }, "last_page": { "type": "integer", "minimum": 1 },
+                "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" },
+                "confirmed_scope": { "type":"string" }
+            }), &["question"])),
+        #[cfg(target_os = "macos")]
+        t("ai_summarize", "Summarize PDF with an AI provider", "Preview the provider and page range with user_confirmed omitted. Ask the user before sending the selected PDF text. To send, set user_confirmed to true and repeat the endpoint and model from the preview. The call may incur provider charges and does not modify the PDF.")
+            .cmd("ai.summary")
+            .with(schema(json!({ "doc": doc(), "provider": { "type": "string", "description": "Saved profile name (default: the active provider)." },
+                "first_page": { "type": "integer", "minimum": 1 }, "last_page": { "type": "integer", "minimum": 1 },
+                "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" }
+            }), &["doc", "first_page", "last_page"])),
+        #[cfg(target_os = "macos")]
+        t("ai_translate", "Translate PDF text", "Translate selected pages or a rectangle. Set ocr_language for local scan recognition and to get recognized source text with page locations. First preview with user_confirmed omitted and ask the user before sending. After consent, repeat with user_confirmed true and the previewed endpoint and model. For OCR also echo scope_token as confirmed_scope. Provider charges may apply.")
+            .cmd("ai.translate")
+            .with(schema(json!({ "doc": doc(), "provider": { "type": "string", "description": "Saved profile name (default: the active provider)." },
+                "target_language": { "type": "string", "minLength": 1 }, "first_page": { "type": "integer", "minimum": 1 }, "last_page": { "type": "integer", "minimum": 1 },
+                "selection": schema(json!({"page":{"type":"integer","minimum":1},"rect":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"[x0,y0,x1,y1] in displayed page points. With OCR, replaces first_page and last_page."}}), &["page", "rect"]),
+                "ocr_language": {"type":"string"}, "ocr_engine": {"enum":["auto","ocrs","tesseract"]}, "confirmed_scope": {"type":"string"},
+                "user_confirmed": { "type": "boolean" }, "confirmed_endpoint": { "type": "string" }, "confirmed_model": { "type": "string" }
+            }), &["doc", "target_language"])),
         t("text_word_count", "Word count", "Count Unicode words and characters on selected pages (default all), with totals and per-page counts. Table/code exclusions use PDF structure tags, not visual guesses; unclassified text is retained. Image exclusion removes Figure-tagged and invisible/OCR text. Does not run OCR. Copy permission is required. Fails rather than returning a partial total when a page cannot be read.")
             .ro()
             .cmd("file.word_count")
@@ -681,7 +719,7 @@ pub fn tools() -> Vec<ToolDef> {
         t("doc_export_data", "Export comments or form data", "Write comments and/or form data to path; the extension picks the format: .xfdf or .fdf (comments and/or fields), .xml, .csv or .txt (form data). For an XFA form, .xml is its data alone (rooted at the form's root data node, as Acrobat exports it) and .xdp an XML Data Package holding the whole datasets. what: all (default), comments, fields.")
             .destructive()
             .with(schema(json!({ "doc": doc(), "path": { "type": "string" }, "what": { "type": "string", "enum": ["all", "comments", "fields"] } }), &["doc", "path"])),
-        t("doc_import_data", "Import comments or form data", "Import comments and/or field values from an XFDF, FDF, XML, CSV or tab-delimited text file (detected from its content), or the comments of another PDF, each onto the page with the same number (comments on pages past this document's last page are left out). Comments with the same name are replaced; values go through the form's formats and validation. For an XFA form, an XDP, datasets or data XML file replaces the form's data: a laid-out form is laid out again from it (rows included) and its calculations run. Undoable.")
+        t("doc_import_data", "Import comments or form data", "Import comments and/or field values from an XFDF, FDF, XML, CSV or tab-delimited text file (detected from its content), or the comments of another PDF, each onto the page with the same number (comments on pages past this document's last page are left out). Comments with the same name are replaced; values go through the form's formats and validation. For an XFA form, an XDP, datasets or data XML file replaces the form's data: a laid-out form is laid out again from it (rows included) and its calculations run. Undoable. The result lists in `import_repairs` what this import left out (values the form refused, comments taken without their appearance); the import fails instead only when the form refuses every value and no comment is taken.")
             .with(schema(json!({ "doc": doc(), "path": { "type": "string" } }), &["doc", "path"])),
         t("form_delete_field", "Delete a field", "Delete a form field and all its widgets, or with widget only that one: one radio button of a group (widget n is the nth of the radio group's options in form_fields), or one copy of a duplicated field. A field's last widget takes the field with it. Undoable.")
             .destructive()
@@ -908,6 +946,9 @@ pub fn tools() -> Vec<ToolDef> {
                 }),
                 &["doc", "page", "index"],
             )),
+        t("link_run_javascript", "Run a link's JavaScript", "Run the JavaScript action of link `index` on page `page` (1-based, from link_list: index is the link's place among the page's annotations), as clicking it does: event.type Link, event.name Mouse Up, event.target the document, this.pageNum the link's page, in the document's script realm. answers reply to its popup menus, response dialogs and alerts in order (null cancels a menu or response; missing answers do too); a menu with no items answers null without using one. Field changes and resetForm are one undoable step; a script that fails commits nothing and its requests are dropped. Returns alerts, console, requests (page, url, open_doc and others, never carried out), error and result.")
+            .destructive()
+            .with(schema(json!({ "doc": doc(), "page": { "type": "integer", "minimum": 1 }, "index": { "type": "integer", "minimum": 1 }, "answers": {"type":"array","maxItems":32,"items":{"type":["string","null"],"maxLength":4096}} }), &["doc", "page", "index"])),
         t("link_delete", "Delete a link", "Delete one link (page, index from link_list). Undoable.")
             .destructive()
             .with(schema(json!({ "doc": doc(), "page": { "type": "integer", "minimum": 1 }, "index": { "type": "integer", "minimum": 1 } }), &["doc", "page", "index"])),
@@ -1181,6 +1222,13 @@ pub fn tools() -> Vec<ToolDef> {
         t("page_duplicate", "Duplicate pages", "Insert copies of pages so the first copy becomes page `at`, or after the last of them when `at` is left out (fonts and images are shared, not copied). Undoable.")
             .cmd("page.duplicate")
             .with(schema(json!({ "doc": doc(), "pages": pages("to duplicate"), "at": { "type": "integer", "minimum": 1 } }), &["doc", "pages"])),
+        t("page_templates", "List page templates", "The document's page templates (ISO 32000-2 §7.7.4: the name dictionary's /Templates, pages kept out of the document, then /Pages, named visible pages): each name, and whether it is hidden. A form's JavaScript adds pages from them (Template.spawn) or shows them (Template.hidden = false).")
+            .ro()
+            .with(schema(json!({ "doc": doc() }), &["doc"])),
+        t("page_template_spawn", "Add a page from a template", "Insert a copy of page template `name` so it becomes page `at` (default: after the last page), as JavaScript's Template.spawn does. With rename (the default, as in Acrobat) the copy's fields are its own, named P<at-1>.<name>.<field>; with rename false they are more widgets of the template's fields and share their values. Undoable.")
+            .with(schema(json!({ "doc": doc(), "name": { "type": "string" }, "at": { "type": "integer", "minimum": 1 }, "rename": { "type": "boolean" } }), &["doc", "name"])),
+        t("page_template_set_hidden", "Show or hide a page template", "Show page template `name` (hidden false: its own page goes at the end of the document, with its fields) or hide it again (hidden true: the page leaves the document and is kept as a template), as JavaScript's Template.hidden does. Undoable.")
+            .with(schema(json!({ "doc": doc(), "name": { "type": "string" }, "hidden": { "type": "boolean" } }), &["doc", "name", "hidden"])),
         t(
             "page_transition_set",
             "Set page transitions",
@@ -1204,7 +1252,7 @@ pub fn tools() -> Vec<ToolDef> {
         t(
             "page_set_box",
             "Set page boxes / crop",
-            "Set a page box (crop by default; also trim, bleed, art, media) on pages: either margins in points from the media box [left, bottom, right, top], or an absolute rect in points from the top-left of the displayed page. Omit both to reset the box to its default. Undoable.",
+            "Set a page box (crop by default; also trim, bleed, art, media) on pages: either margins from the media box [left, bottom, right, top] in default user-space units of the unrotated page (not points when the page has /UserUnit), or an absolute rect in points from the top-left of the displayed page. Omit both to reset the box to its default. Undoable.",
         )
         .cmd("page.boxes")
         .with(schema(
@@ -1443,6 +1491,10 @@ pub fn tools() -> Vec<ToolDef> {
             }),
             &["doc", "field", "event"],
         )),
+        t("js_page", "Run page actions", "Read the document at `page`, as the viewer does when that page becomes the one being read: the actions the page it was at runs as it closes, then this page's open actions (its own, and its annotations' page-open and page-visible actions, which start an animation made with the LaTeX animate package), in the document's JavaScript context, which buttons, the console and timers share. Fields the actions show or hide change only how the document is shown, and page_render draws them so; values they change are applied as one undoable step. Returns the actions' alerts, console output, requests and errors, the pages showing a field they showed or hid, and when the next timer falls due on the script clock (js_advance moves it).")
+            .with(schema(json!({ "doc": doc(), "page": { "type": "integer", "minimum": 1 } }), &["doc", "page"])),
+        t("js_advance", "Advance the script clock", "Move the document's script clock on by `ms` milliseconds and run the timers its scripts set (app.setInterval, app.setTimeOut) as they fall due on the way, in order, as the viewer runs them over time: an animation shows its next frames. Fields timers show or hide change only how the document is shown, and page_render draws them so. A timer's alerts and requests go to its console output instead. Returns how many timers ran, their console output and errors, the pages showing a field they showed or hid, the clock, and when the next timer falls due.")
+            .with(schema(json!({ "doc": doc(), "ms": { "type": "number", "minimum": 0, "maximum": 3600000 } }), &["doc", "ms"])),
         t("js_document_scripts", "Document JavaScripts", "List the document-level JavaScripts (name and source), which define functions field scripts use.")
             .ro()
             .cmd("tools.document_js")
@@ -1490,6 +1542,14 @@ pub fn tools() -> Vec<ToolDef> {
             .ro()
             .cmd("doc.compare")
             .with(schema(json!({ "doc": doc(), "other": { "type": "integer", "description": "The older document (from doc_open)." }, "limit": { "type": "integer", "minimum": 1, "description": "List at most this many changes (default 500)." }, "visual": { "type": "boolean", "description": "Also compare how pages look (page n with page n): regions that differ visually." } }), &["doc", "other"])),
+        #[cfg(target_os = "macos")]
+        t("ai_compare", "Explain what changed between two PDFs", "Compare two open PDF revisions and return verified before-and-after explanations with citations. Pass other for the older PDF and doc for the newer PDF. Preview first, then ask the user to confirm sending changed passages with nearby text to the shown provider to rank them. Repeat with user_confirmed true, the previewed endpoint and model, and scope_token as confirmed_scope.")
+            .cmd("doc.compare")
+            .with(schema(json!({
+                "doc": doc(), "other": doc(), "pages": pages("in the newer PDF (omit for all)"), "provider": {"type":"string"},
+                "user_confirmed": {"type":"boolean"}, "confirmed_endpoint": {"type":"string"}, "confirmed_model": {"type":"string"},
+                "confirmed_scope": {"type":"string"}
+            }), &["doc", "other"])),
         t("doc_compare_report", "Compare report", "Write the compare summary report (a PDF listing every change) to path.")
             .cmd("doc.compare")
             .with(schema(json!({ "doc": doc(), "other": { "type": "integer" }, "path": { "type": "string" } }), &["doc", "other", "path"])),
@@ -1748,6 +1808,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "aligns": { "type": "array", "maxItems": 4096, "items": { "type": "string", "enum": ["left", "center", "right", "justify", "inherit"] }, "description": "Each paragraph's (line's) own alignment, by index; inherit (or legacy null) follows align." },
                     "underline": { "type": "boolean" },
                     "line_spacing": { "type": "number", "description": "Multiple of the font size (1.2 is ordinary)." },
+                    "paragraph_spacing": { "type": "number", "description": "Points between paragraphs (a line break in text starts one), beyond the line spacing; unset, half the size for a paragraph the page did not have (rows it had keep their space); 0 is none." },
                     "dx": { "type": "number", "description": "Paragraph only: move right by this many points (negative: left)." },
                     "dy": { "type": "number", "description": "Paragraph only: move up by this many points (negative: down)." },
                     "width": { "type": "number", "description": "Paragraph only: rewrap to this width in points (dragging the box's edge)." },

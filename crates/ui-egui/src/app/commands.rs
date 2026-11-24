@@ -184,6 +184,10 @@ impl PdfCraftApp {
     /// keeps comment tools from reopening it; opening it again lets them (#225). A choice made in
     /// Read mode replaces the pane saved on the way in, so leaving Read mode doesn't undo it.
     pub fn choose_right_panel(&mut self, panel: Option<RightPanel>) {
+        #[cfg(target_os = "macos")]
+        if panel != Some(RightPanel::AiChat) {
+            self.ai_chat_anchor = None;
+        }
         if self.mode == Mode::Read {
             self.right_before_read = None;
         }

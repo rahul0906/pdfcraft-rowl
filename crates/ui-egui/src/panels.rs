@@ -36,6 +36,8 @@ pub(crate) enum Nav {
     /// A bookmark's action that goes nowhere in this document, run as a link's is.
     Action(pdfcraft_render::LinkTarget),
     Flash(usize, [f32; 4]),
+    #[cfg(target_os = "macos")]
+    AiCitation(pdfcraft_engine::DocId, usize, pdfcraft_platform::ai_chat::CitationLocation),
 }
 
 pub fn human_size(n: usize) -> String {

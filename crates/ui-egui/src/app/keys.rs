@@ -46,8 +46,21 @@ impl PdfCraftApp {
         if chords {
             self.registry_shortcuts(ctx);
         }
-        // (Esc closes a Combine file shown large first.)
-        if self.full_screen && self.combine_tab.preview.is_none() && self.page_keys.pressed(ctx, Key::Escape) {
+        if self.escape_reading_selection(ctx) {
+            return;
+        }
+        // Esc closes one thing at a time: a Combine file shown large, an open menu, or the camera,
+        // a selection or the find bar on the page go first, and full screen stays (#5302). With
+        // the Esc leaves full screen preference off, only ⌘L / Ctrl+L leaves it.
+        let page_takes_escape =
+            egui::Popup::is_any_open(ctx) || self.active.and_then(|i| self.views.get(i)).is_some_and(|v| v.escape_closes_something());
+        if self.full_screen
+            && self.full_screen_escape_exits
+            && self.combine_tab.preview.is_none()
+            && !page_takes_escape
+            // Taken: the Esc that leaves full screen closes nothing on the page as well.
+            && self.page_keys.take(ctx, Key::Escape)
+        {
             self.set_full_screen(ctx, false);
         }
         if let Some(i) = self.active {
@@ -79,6 +92,29 @@ impl PdfCraftApp {
 }
 
 impl PdfCraftApp {
+    fn escape_reading_selection(&mut self, ctx: &egui::Context) -> bool {
+        let Some((index, _document)) = self.active_ids() else { return false };
+        #[cfg(target_os = "macos")]
+        let chat = (self.right == Some(RightPanel::AiChat) && !self.full_screen).then_some(self.ai_chat_anchor.unwrap_or(_document));
+        #[cfg(target_os = "macos")]
+        let (has_scope, question_focused) =
+            chat.map_or((false, false), |id| (ai_chat_ui::has_selection(&self.ai_chats, id), ai_chat_ui::question_has_focus(ctx, id)));
+        #[cfg(not(target_os = "macos"))]
+        let (has_scope, question_focused) = (false, false);
+
+        if !self.views.get_mut(index).is_some_and(|view| view.escape_reading_selection(ctx, self.page_keys, has_scope, question_focused)) {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            ai_chat_ui::clear_selection(&mut self.ai_chats, _document);
+            if let Some(id) = chat.filter(|&id| id != _document) {
+                ai_chat_ui::clear_selection(&mut self.ai_chats, id);
+            }
+        }
+        true
+    }
+
     /// ⌘A selects all of the document or the page grid, unless a text field or overlay owns the
     /// keyboard.
     fn select_all_keys(&mut self, i: usize, ctx: &egui::Context) {

@@ -255,7 +255,7 @@ fn meta_tools() -> [Value; 2] {
                 "required": ["name"],
                 "additionalProperties": false,
             },
-            "annotations": { "title": "Run any PdfCraft tool", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
+            "annotations": { "title": "Run any PdfCraft tool", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": cfg!(target_os = "macos") },
         }),
     ]
 }
@@ -557,7 +557,7 @@ fn tool_json(t: &crate::ToolDef) -> Value {
         "title": t.title,
         "description": t.description,
         "inputSchema": t.input_schema,
-        "annotations": { "title": t.title, "readOnlyHint": t.read_only, "destructiveHint": t.destructive, "idempotentHint": t.read_only || matches!(t.name, "doc_save" | "doc_optimize" | "doc_export_data" | "measure_export" | "doc_export_images" | "doc_export_office" | "doc_export_all_images" | "doc_export_text" | "image_save" | "bookmark_export"), "openWorldHint": false },
+        "annotations": { "title": t.title, "readOnlyHint": t.read_only, "destructiveHint": t.destructive, "idempotentHint": t.read_only || matches!(t.name, "doc_save" | "doc_optimize" | "doc_export_data" | "measure_export" | "doc_export_images" | "doc_export_office" | "doc_export_all_images" | "doc_export_text" | "image_save" | "bookmark_export"), "openWorldHint": matches!(t.name, "ai_llama_models" | "ai_summarize" | "ai_ask" | "ai_translate" | "ai_compare") },
     })
 }
 

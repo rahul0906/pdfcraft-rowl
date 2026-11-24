@@ -20,6 +20,10 @@ pub enum AreaChoice {
     Print,
     /// Save the copied picture as a PNG file.
     Save,
+    #[cfg(target_os = "macos")]
+    AskArea,
+    #[cfg(target_os = "macos")]
+    TranslateArea,
 }
 
 /// Drag a rectangle on page `page` (Marquee Zoom, Snapshot), with a press nobody holds (`free`).
@@ -48,12 +52,21 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, xf: &PageXform, p
             .fixed_pos(r.left_bottom() + egui::vec2(0.0, 6.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button(tl!("Print area…")).clicked() {
                             view.area_choice = Some(AreaChoice::Print);
                         }
                         if ui.button(tl!("Save as image…")).clicked() {
                             view.area_choice = Some(AreaChoice::Save);
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            if ui.button(tl!("Ask about area…")).clicked() {
+                                view.area_choice = Some(AreaChoice::AskArea);
+                            }
+                            if ui.button(tl!("Translate area…")).clicked() {
+                                view.area_choice = Some(AreaChoice::TranslateArea);
+                            }
                         }
                     });
                 });

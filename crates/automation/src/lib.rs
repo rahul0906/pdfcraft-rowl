@@ -52,6 +52,8 @@ pub use tools::{ToolDef, tools};
 
 use text_cache::TextCache;
 
+#[cfg(target_os = "macos")]
+mod ai;
 mod assemble;
 mod bookmark_io;
 mod dispatch;

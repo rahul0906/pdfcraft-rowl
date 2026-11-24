@@ -14,15 +14,19 @@ impl DocView {
         if self.organize {
             return None;
         }
+        // Across pages, the corner is on the selection's first page.
+        let first = self.selection.map(|s| *s.pages().start());
         if let Some(sel) = self.selection
-            && let Some(text) = self.texts.get(&sel.page)
-            && let Some(p) = info.pages.get(sel.page)
+            && let Some(first) = first
+            && let Some(text) = self.texts.get(&first)
+            && let Some(p) = info.pages.get(first)
         {
             // The selection's bounds in view space, which View ▸ Rotate View leaves unturned: the
             // corner at the screen's top-left is a different one for each quarter turn.
-            let [x0, y0, x1, y1] = sel.rects(text).iter().fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY], |b, r| {
-                [b[0].min(r[0]), b[1].min(r[1]), b[2].max(r[2]), b[3].max(r[3])]
-            });
+            let [x0, y0, x1, y1] =
+                sel.rects_on(first, text).iter().fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY], |b, r| {
+                    [b[0].min(r[0]), b[1].min(r[1]), b[2].max(r[2]), b[3].max(r[3])]
+                });
             let (x, y) = match self.rotation {
                 90 => (x0, y1),
                 180 => (x1, y1),
@@ -30,7 +34,7 @@ impl DocView {
                 _ => (x0, y0),
             };
             if x.is_finite() && y.is_finite() {
-                return Some((sel.page, p.xyz_for_view(Some(x), Some(y))));
+                return Some((first, p.xyz_for_view(Some(x), Some(y))));
             }
         }
         // The page showing at the window's top edge: one that crosses it (the first, in a spread
@@ -201,6 +205,53 @@ impl DocView {
         if fx.is_some() || fy.is_some() {
             self.goto_point = Some((page, fx, fy, rel));
         }
+    }
+
+    /// Whether Esc has something on the page to close: the camera, a form field being filled (its
+    /// editor closes it), a selection or the find bar ([`shortcuts`] closes the others in that
+    /// order). Esc closes one thing at a time, so full screen leaves only on an Esc that finds none
+    /// of them (#5302): from a field, "Esc (press twice)" leaves (*Adobe Acrobat Help*, 2019,
+    /// p. 248). A search shown in the Search panel isn't on the page: full screen hides the panel,
+    /// and keeps its search.
+    pub fn escape_closes_something(&self) -> bool {
+        self.camera.is_some()
+            || self.camera_done.is_some()
+            || self.forms.focus.is_some()
+            || self.has_reading_selection()
+            || self.marquee.is_some()
+            || self.find.as_ref().is_some_and(|f| !f.in_panel)
+    }
+
+    fn has_reading_selection(&self) -> bool {
+        self.selection.is_some() || self.all_text || self.area_pick.is_some()
+    }
+
+    pub(crate) fn escape_reading_selection(
+        &mut self,
+        ctx: &egui::Context,
+        keys: crate::page_keys::PageKeys,
+        chat_selection: bool,
+        question_focused: bool,
+    ) -> bool {
+        // A live drag is cancelled by the page's press handler, which also ignores its release.
+        let free =
+            self.camera.is_none() && self.camera_done.is_none() && self.forms.focus.is_none() && !self.selection_drag && self.marquee.is_none();
+        if free
+            && (chat_selection || self.has_reading_selection())
+            && (question_focused || !ctx.egui_wants_keyboard_input())
+            && keys.take(ctx, egui::Key::Escape)
+        {
+            self.clear_reading_selection();
+            return true;
+        }
+        false
+    }
+
+    fn clear_reading_selection(&mut self) {
+        self.clear_selection();
+        self.all_text = false;
+        self.area_pick = None;
+        self.area_choice = None;
     }
 
     /// Next page (`true`) or previous page. In two-page view this moves a whole spread: the other
@@ -379,6 +430,22 @@ fn zoom_shortcuts(view: &mut DocView, pressed: &impl Fn(egui::KeyboardShortcut) 
     }
 }
 
+/// Esc on the page closes one thing: the camera, then a form field being filled, then a
+/// selection, then the find bar ([`DocView::escape_closes_something`] says whether there is one).
+fn escape_closes_one(view: &mut DocView) {
+    if view.camera.is_some() || view.camera_done.is_some() {
+        view.pending_action = Some(ViewAction::CancelCamera);
+    } else if view.forms.focus.is_some() {
+        // A form field being filled takes this Esc: its editor closes it, and nothing else on
+        // the page closes with it (a selection stays for the next Esc).
+    } else if view.has_reading_selection() {
+        view.clear_reading_selection();
+    } else if view.presentation.is_none() || view.find.as_ref().is_some_and(|f| !f.in_panel) {
+        // Full screen hides the Search panel: its search stays for when the panel is back.
+        view.find = None;
+    }
+}
+
 /// The view's keys: its chords, then its plain keys. `chords`: no menu of the menu bar has the
 /// keyboard and nothing covers the pages, so chords may run (they wait for a menu, as the
 /// registered commands' do). An open form field keeps the paging and scrolling keys for itself.
@@ -458,14 +525,7 @@ fn view_keys(
     // An open menu takes Escape first and closes; the selection stays for the next one (#3535).
     // So does an open field, whose list closes.
     if key(Key::Escape) && !egui::Popup::is_any_open(ctx) && !field_open {
-        if view.camera.is_some() || view.camera_done.is_some() {
-            view.pending_action = Some(ViewAction::CancelCamera);
-        } else if view.selection.is_some() || view.all_text {
-            view.selection = None;
-            view.all_text = false;
-        } else {
-            view.find = None;
-        }
+        escape_closes_one(view);
     }
     // The open field's keys leave the page under it where it is.
     if field_open {

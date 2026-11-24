@@ -412,13 +412,25 @@ dialogs, panels and keyboard shortcuts. Command search accepts the translated la
 English label and the stable command id; filenames, PDF contents, author names, custom
 action names and error details from the engine or the operating system keep their own text.
 
-Japanese fonts come from [craft-fonts](https://github.com/storytold/craft-fonts), an optional build
-input that every release includes. To build with them (Japanese interface text, and Japanese text in
-edited PDFs):
+Script fonts come from [craft-fonts](https://github.com/storytold/craft-fonts), an optional build
+input that every release includes. This includes Noto Sans Devanagari Regular for Hindi interface
+text and translation results, as well as the Japanese fonts used in the interface and edited PDFs.
+Local Cargo builds look in the gitignored `craft-fonts/` directory by default. Set it up once,
+using the same revision as the release build:
 
 ```sh
-git clone https://github.com/storytold/craft-fonts ../craft-fonts
-CRAFT_FONTS_DIR=../craft-fonts cargo run --release -p pdfcraft -- some.pdf
+git clone https://github.com/storytold/craft-fonts craft-fonts
+git -C craft-fonts checkout b076417b5880bd4154bd22f00695b1d28c6bea83
+cargo run -p pdfcraft -- some.pdf
+```
+
+`CRAFT_FONTS_DIR` overrides that default when the checkout lives elsewhere. A build without the
+font checkout still works, using installed script fonts on desktop. Installing Noto on macOS
+alone does not change the app's explicit system fallback order; bundle it at build time instead.
+To check that Hindi uses bundled Noto before installed fonts, including conjunct shaping:
+
+```sh
+cargo test -p pdfcraft-ui-egui --test it fonts::hindi_translation_prefers_bundled_noto -- --ignored --exact
 ```
 
 Each [GitHub release](https://github.com/storytold/pdfcraft/releases) has ready-made builds for macOS,

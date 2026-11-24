@@ -71,6 +71,16 @@ impl Automation {
             "page_render" => return self.page_render(&a),
             "model_render" => return self.model_render(&a),
             "comment_image_preview" => return self.comment_image_preview(&a),
+            #[cfg(target_os = "macos")]
+            "ai_llama_models" => self.ai_llama_models(&a)?,
+            #[cfg(target_os = "macos")]
+            "ai_summarize" => self.ai_transform(&a, false)?,
+            #[cfg(target_os = "macos")]
+            "ai_translate" => self.ai_transform(&a, true)?,
+            #[cfg(target_os = "macos")]
+            "ai_ask" => self.ai_ask(&a)?,
+            #[cfg(target_os = "macos")]
+            "ai_compare" => self.ai_compare(&a)?,
             "text_extract" => self.text_extract(&a)?,
             "text_word_count" => self.text_word_count(&a)?,
             "text_find" => self.text_find(&a)?,
@@ -315,6 +325,22 @@ impl Automation {
                 let at = self.opt_position(&a, "at")?;
                 self.apply(&a, Edit::DuplicatePages { pages, at })?
             }
+            "page_templates" => {
+                let templates: Vec<Value> = self.doc(&a)?.templates().into_iter().map(|t| json!({ "name": t.name, "hidden": t.hidden })).collect();
+                json!({ "templates": templates })
+            }
+            "page_template_spawn" => {
+                let at = self.opt_position(&a, "at")?.unwrap_or(self.doc(&a)?.info.pages.len());
+                let edit = Edit::SpawnTemplate { name: a.str("name")?.into(), at, rename: a.opt_bool("rename")?.unwrap_or(true) };
+                self.apply(&a, edit)?
+            }
+            "page_template_set_hidden" => self.apply(
+                &a,
+                Edit::SetTemplateHidden {
+                    name: a.str("name")?.into(),
+                    hidden: a.opt_bool("hidden")?.ok_or_else(|| ToolError::InvalidArgs("hidden is required".into()))?,
+                },
+            )?,
             "page_set_box" => self.page_set_box(&a)?,
             "page_transition_set" => self.page_transition_set(&a)?,
             "doc_create" => self.doc_create(&a)?,
@@ -614,6 +640,7 @@ impl Automation {
                     size: a.opt_num("size")?,
                     underline: a.opt_bool("underline")?,
                     line_spacing: a.opt_num("line_spacing")?,
+                    paragraph_spacing: a.opt_num("paragraph_spacing")?,
                     char_spacing: a.opt_num("char_spacing")?,
                     scale: a.opt_num("scale")?,
                     width,
@@ -734,6 +761,7 @@ impl Automation {
             "link_add" => self.link_add(&a)?,
             "link_edit" => self.link_edit(&a)?,
             "link_delete" => self.link_delete(&a)?,
+            "link_run_javascript" => self.link_run_javascript(&a)?,
             "links_from_urls" => self.links_from_urls(&a)?,
             "links_remove" => self.links_remove(&a)?,
             "object_list" => self.object_list(&a)?,
@@ -837,6 +865,8 @@ impl Automation {
             "ocr_recognize" => self.ocr_recognize(&a)?,
             "js_run" => self.js_run(&a)?,
             "js_event" => self.js_event(&a)?,
+            "js_page" => self.js_page(&a)?,
+            "js_advance" => self.js_advance(&a)?,
             "js_document_scripts" => self.js_document_scripts(&a)?,
             "js_set_document_script" => self.js_set_document_script(&a)?,
             "js_enabled" => self.js_enabled(&a)?,
