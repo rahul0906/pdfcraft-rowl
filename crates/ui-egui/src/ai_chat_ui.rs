@@ -7,6 +7,9 @@ use std::sync::{
 };
 
 use base64::Engine as _;
+use craft::ui::choice::Checkbox;
+use craft::ui::contract::{Bind, Entry, Props as _, Show as _};
+use craft::ui::pickers::Select;
 use pdfcraft_engine::{
     DocId, Document, Session, ai_ask, ai_ocr,
     ai_summary::{self, SummarySource},
@@ -18,7 +21,7 @@ use pdfcraft_platform::{
 };
 
 use crate::ai_ui::{Job, poll, start};
-use crate::{PdfCraftApp, RightPanel, theme};
+use crate::{PdfCraftApp, RightPanel};
 
 pub(crate) type Chats = HashMap<DocId, Chat>;
 
@@ -403,7 +406,7 @@ fn provider() -> Result<ai::Profile, String> {
 pub(crate) fn open(app: &mut PdfCraftApp, task: Task) {
     let Some((view, id)) = app.active_ids() else { return };
     let Some(doc) = app.session.get(id) else { return };
-    let current_page = app.views.get(view).map_or(1, |view| view.current.saturating_add(1));
+    let current_page = app.views.get(view).map_or(1, |view| view.current().saturating_add(1));
     let chat = chat_for(&mut app.ai_chats, doc, current_page);
     chat.task = task;
     if chat.figure {
@@ -418,19 +421,45 @@ fn question_id(doc: DocId) -> egui::Id {
     egui::Id::unique(("ai-question-draft", doc.0))
 }
 
-pub(crate) fn question_has_focus(ctx: &egui::Context, doc: DocId) -> bool {
+#[cfg(test)]
+fn question_has_focus(ctx: &egui::Context, doc: DocId) -> bool {
     ctx.memory(|memory| memory.has_focus(question_id(doc)))
 }
 
-pub(crate) fn has_selection(chats: &Chats, doc: DocId) -> bool {
-    chats.get(&doc).is_some_and(|chat| chat.selection.is_some())
+/// The draft is an egui text field and receives Escape outside Craft's window intents.
+pub(crate) fn escape_question_scope(app: &mut PdfCraftApp, ctx: &egui::Context) {
+    if app.covers_pages() || app.full_screen() || egui::Popup::is_any_open(ctx) {
+        return;
+    }
+    let Some((index, id)) = app.active_ids() else { return };
+    let owner = app.ai_chat_anchor.unwrap_or(id);
+    if app.right() == Some(RightPanel::AiChat)
+        && app.ai_chats.get(&owner).is_some_and(|chat| chat.selection.is_some())
+        // egui can release the question's focus at the start of this Escape frame.
+        && ctx.memory(|memory| memory.had_focus_last_frame(question_id(owner)))
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    {
+        clear_page_scope(app, index, id);
+    }
 }
 
-pub(crate) fn clear_selection(chats: &mut Chats, doc: DocId) {
-    if let Some(chat) = chats.get_mut(&doc).filter(|chat| chat.selection.is_some()) {
-        chat.clear_selection();
-        chat.error = None;
+pub(crate) fn clear_page_scope(app: &mut PdfCraftApp, index: usize, id: DocId) -> bool {
+    let owner = app.ai_chat_anchor.unwrap_or(id);
+    if app.full_screen() || app.right() != Some(RightPanel::AiChat) || app.ai_chats.get(&owner).is_none_or(|chat| chat.selection.is_none()) {
+        return false;
     }
+    for id in [owner, id] {
+        if let Some(chat) = app.ai_chats.get_mut(&id).filter(|chat| chat.selection.is_some()) {
+            chat.clear_selection();
+            chat.error = None;
+        }
+    }
+    if let Some(view) = app.views.get_mut(index) {
+        view.clear_selection();
+        view.session.all_text = false;
+        view.session.area_pick = None;
+    }
+    true
 }
 
 pub(crate) fn open_selection(app: &mut PdfCraftApp, view: usize, selection: ai_ask::Selection) {
@@ -444,7 +473,7 @@ pub(crate) fn open_region(app: &mut PdfCraftApp, view: usize, page: usize, rect:
 fn open_scope(app: &mut PdfCraftApp, view: usize, selection: ai_ask::Selection, task: Task, figure: bool) {
     let Some(view_id) = app.views.get(view).map(|view| view.id) else { return };
     let Some(doc) = app.session.get(view_id) else { return };
-    let chat = chat_for(&mut app.ai_chats, doc, app.views.get(view).map_or(1, |view| view.current.saturating_add(1)));
+    let chat = chat_for(&mut app.ai_chats, doc, app.views.get(view).map_or(1, |view| view.current().saturating_add(1)));
     if chat.job.is_some() {
         chat.error = Some("Stop the current request before asking about a selection.".into());
     } else {
@@ -495,7 +524,7 @@ pub(crate) fn reveal_citation(app: &mut PdfCraftApp, owner: DocId, page: usize, 
     let Some(view) = app.views.get_mut(index) else { return };
     if let Some(rect) = rects.first().copied() {
         view.reveal_rect(page, rect, info);
-        view.citation_flash = Some((page, rects, 0.0));
+        view.session.citation_flash = Some((page, rects, 0.0));
     } else {
         view.go_to_page(page);
     }
@@ -524,7 +553,6 @@ pub(crate) fn refresh(chats: &mut Chats, session: &pdfcraft_engine::Session) {
 
 pub(crate) fn panel(
     ui: &mut egui::Ui,
-    t: &theme::Tokens,
     doc: &Document,
     session: &Session,
     current_page: usize,
@@ -537,24 +565,24 @@ pub(crate) fn panel(
     }
     let chat = chat_for(chats, doc, current_page);
     ui.push_id(doc.id.0, |ui| {
-        header(ui, chat, t);
+        header(ui, chat);
         let settings = if chat.archive.is_none() {
             egui::Panel::bottom("ai-composer")
                 .resizable(false)
                 .show_separator_line(false)
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| composer(ui, chat, doc, session, t))
+                .show(ui, |ui| composer(ui, chat, doc, session))
                 .inner
         } else {
             false
         };
-        conversation(ui, chat, doc, nav, t);
+        conversation(ui, chat, doc, nav);
         settings
     })
     .inner
 }
 
-fn header(ui: &mut egui::Ui, chat: &mut Chat, t: &theme::Tokens) {
+fn header(ui: &mut egui::Ui, chat: &mut Chat) {
     ui.horizontal(|ui| {
         let width = (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 3.0;
         for (task, label) in [(Task::Ask, tl!("Ask")), (Task::Summarize, tl!("Summarize")), (Task::Translate, tl!("Translate"))] {
@@ -568,50 +596,56 @@ fn header(ui: &mut egui::Ui, chat: &mut Chat, t: &theme::Tokens) {
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        let options = ui.button(tl!("Chat options"));
-        egui::Popup::menu(&options).show(|ui| {
-            ui.add_enabled_ui(chat.job.is_none(), |ui| {
-                if chat.path.is_some() {
-                    let mut enabled = chat.history.enabled;
-                    if ui.add(crate::widgets::checkbox(&mut enabled, tl!("Save chats on this Mac"))).changed() {
-                        let id = chat.revision.clone();
-                        let turns = chat.turns.clone();
-                        chat.persist(enabled, enabled.then_some((id.as_str(), turns.as_slice())));
-                    }
-                }
-                if ui.button(tl!("New chat")).clicked() {
-                    chat.confirm_new = !chat.turns.is_empty();
-                    if !chat.confirm_new {
-                        chat.archive = None;
-                        chat.question.clear();
-                    }
-                    ui.close();
-                }
-                if chat.history.revisions.iter().any(|entry| entry.id != chat.revision) {
-                    ui.separator();
-                    if ui.selectable_label(chat.archive.is_none(), tl!("Current revision")).clicked() {
-                        chat.archive = None;
-                        ui.close();
-                    }
-                    for (i, entry) in chat.history.revisions.iter().enumerate().rev().filter(|(_, entry)| entry.id != chat.revision) {
-                        let selected = chat.archive.as_deref() == Some(entry.id.as_str());
-                        if ui.selectable_label(selected, format!("{} {}", tl!("Older revision"), i + 1)).clicked() {
-                            chat.archive = Some(entry.id.clone());
-                            ui.close();
+        crate::comments::popover_from(
+            ui,
+            tl!("Chat options"),
+            |ui| ui.button(tl!("Chat options")),
+            |ui| {
+                let mut close = false;
+                ui.add_enabled_ui(chat.job.is_none(), |ui| {
+                    if chat.path.is_some() {
+                        let mut enabled = chat.history.enabled;
+                        if Checkbox::new(Bind::bound(&mut enabled)).label(tl!("Save chats on this Mac")).show(ui).value().is_some() {
+                            let id = chat.revision.clone();
+                            let turns = chat.turns.clone();
+                            chat.persist(enabled, enabled.then_some((id.as_str(), turns.as_slice())));
                         }
                     }
-                    if let Some(id) = chat.archive.clone()
-                        && ui.button(tl!("Delete saved chat")).clicked()
-                        && chat.persist(chat.history.enabled, Some((&id, &[])))
-                    {
-                        chat.archive = None;
-                        ui.close();
+                    if ui.button(tl!("New chat")).clicked() {
+                        chat.confirm_new = !chat.turns.is_empty();
+                        if !chat.confirm_new {
+                            chat.archive = None;
+                            chat.question.clear();
+                        }
+                        close = true;
                     }
-                }
-            });
-        });
+                    if chat.history.revisions.iter().any(|entry| entry.id != chat.revision) {
+                        ui.separator();
+                        if ui.selectable_label(chat.archive.is_none(), tl!("Current revision")).clicked() {
+                            chat.archive = None;
+                            close = true;
+                        }
+                        for (i, entry) in chat.history.revisions.iter().enumerate().rev().filter(|(_, entry)| entry.id != chat.revision) {
+                            let selected = chat.archive.as_deref() == Some(entry.id.as_str());
+                            if ui.selectable_label(selected, format!("{} {}", tl!("Older revision"), i + 1)).clicked() {
+                                chat.archive = Some(entry.id.clone());
+                                close = true;
+                            }
+                        }
+                        if let Some(id) = chat.archive.clone()
+                            && ui.button(tl!("Delete saved chat")).clicked()
+                            && chat.persist(chat.history.enabled, Some((&id, &[])))
+                        {
+                            chat.archive = None;
+                            close = true;
+                        }
+                    }
+                });
+                close
+            },
+        );
         if chat.archive.is_some() {
-            ui.label(egui::RichText::new(tl!("Earlier revision")).color(t.text_muted));
+            ui.label(egui::RichText::new(tl!("Earlier revision")).color(ui.visuals().weak_text_color()));
         }
     });
     if chat.confirm_new {
@@ -733,7 +767,14 @@ fn edit_documents(ui: &mut egui::Ui, chosen: &mut Vec<(DocId, (usize, usize))>, 
             let enabled = open.allows_copying() && (checked || chosen.len() < ai_ask::MAX_DOCUMENTS);
             let name = ai_ask::document_label(open, session);
             ui.push_id(open.id.0, |ui| {
-                if ui.add_enabled(enabled || checked, crate::widgets::checkbox(&mut checked, &name)).on_hover_text(&open.name).changed() {
+                if Checkbox::new(Bind::bound(&mut checked))
+                    .label(name)
+                    .enabled(enabled || previous.is_some())
+                    .tooltip(open.name.clone())
+                    .show(ui)
+                    .value()
+                    .is_some()
+                {
                     if checked {
                         chosen.push((open.id, (1, open.info.pages.len())));
                     } else if let Some(index) = previous {
@@ -757,17 +798,30 @@ fn edit_documents(ui: &mut egui::Ui, chosen: &mut Vec<(DocId, (usize, usize))>, 
     changed
 }
 
-fn composer_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session, t: &theme::Tokens) {
+fn composer_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session) {
     ui.horizontal(|ui| {
         let title = scope_summary(chat, doc);
-        let scope = ui.add(egui::Button::image_and_text(crate::icons::image("chevron-down", 12.0, t.icon), title).truncate());
-        egui::Popup::menu(&scope).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            ui.set_max_width(300.0);
-            scope_menu(ui, chat, doc, session);
-        });
+        crate::comments::popover_from(
+            ui,
+            tl!("Document scope"),
+            |ui| ui.add(egui::Button::new(title).truncate()),
+            |ui| {
+                ui.set_max_width(300.0);
+                scope_menu(ui, chat, doc, session);
+                false
+            },
+        );
         if chat.task != Task::Summarize {
-            let ocr = crate::icons::button(ui, "sliders-horizontal", 26.0, chat.scan_text || chat.figure, tl!("OCR settings"));
-            egui::Popup::menu(&ocr).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| scan_controls(ui, chat));
+            let selected = chat.scan_text || chat.figure;
+            crate::comments::popover_from(
+                ui,
+                tl!("OCR settings"),
+                |ui| ui.add(egui::Button::new(tl!("OCR settings")).selected(selected)),
+                |ui| {
+                    scan_controls(ui, chat);
+                    false
+                },
+            );
         }
     });
     if chat.task == Task::Ask {
@@ -782,7 +836,7 @@ fn composer_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &
                 .collect();
             if !entries.is_empty() {
                 ui.add(
-                    egui::Label::new(egui::RichText::new(entries.join("  |  ")).small().color(t.text_muted))
+                    egui::Label::new(egui::RichText::new(entries.join("  |  ")).small().color(ui.visuals().weak_text_color()))
                         .truncate()
                         .show_tooltip_when_elided(false),
                 )
@@ -790,61 +844,40 @@ fn composer_scope(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &
             }
         }
         if chat.figure && chat.destination.as_ref().is_ok_and(ai::Profile::is_llama_cpp) {
-            ui.add(crate::widgets::checkbox(&mut chat.vision, tl!("Include image for local vision")));
+            Checkbox::new(Bind::bound(&mut chat.vision)).label(tl!("Include image for local vision")).show(ui);
         }
     }
 }
 
 fn scan_controls(ui: &mut egui::Ui, chat: &mut Chat) {
     if !chat.figure {
-        ui.add(crate::widgets::checkbox(&mut chat.scan_text, tl!("Recognize scanned text locally")));
+        Checkbox::new(Bind::bound(&mut chat.scan_text)).label(tl!("Recognize scanned text locally")).show(ui);
         if !chat.scan_text {
             return;
         }
     }
-    let language_name = ai_ocr::LANGUAGES.iter().find(|(code, _)| *code == chat.ocr_language).map_or(chat.ocr_language, |(_, name)| *name);
+    let languages: Vec<_> = ai_ocr::LANGUAGES.iter().map(|&(code, name)| Entry::new(code, tl!(name))).collect();
+    let engines = [EngineChoice::Auto, EngineChoice::Ocrs, EngineChoice::Tesseract].map(|engine| Entry::new(engine, tl!(engine.name())));
     ui.horizontal_wrapped(|ui| {
-        ui.vertical(|ui| {
-            let label = ui.label(tl!("OCR source language"));
-            craft_ui::ComboBox::from_id_salt("ai-ocr-language")
-                .selected_text(tl!(language_name))
-                .show_ui(ui, |ui| {
-                    for &(code, name) in ai_ocr::LANGUAGES {
-                        if ui.selectable_value(&mut chat.ocr_language, code, tl!(name)).clicked() {
-                            ui.close();
-                        }
-                    }
-                })
-                .response
-                .labelled_by(label.id);
-        });
-        ui.vertical(|ui| {
-            let label = ui.label(tl!("OCR engine"));
-            craft_ui::ComboBox::from_id_salt("ai-ocr-engine")
-                .selected_text(tl!(chat.ocr_engine.name()))
-                .show_ui(ui, |ui| {
-                    for engine in [EngineChoice::Auto, EngineChoice::Ocrs, EngineChoice::Tesseract] {
-                        if ui.selectable_value(&mut chat.ocr_engine, engine, tl!(engine.name())).clicked() {
-                            ui.close();
-                        }
-                    }
-                })
-                .response
-                .labelled_by(label.id);
-        });
+        Select::new(tl!("OCR source language"), Bind::bound(&mut chat.ocr_language), &languages).show(ui);
+        Select::new(tl!("OCR engine"), Bind::bound(&mut chat.ocr_engine), &engines).show(ui);
     });
 }
 
-fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session, t: &theme::Tokens) -> bool {
+fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Session) -> bool {
     let can_edit = chat.job.is_none() && !chat.confirm_new;
-    let frame = egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(10).inner_margin(9.0);
+    let frame = egui::Frame::new()
+        .fill(ui.visuals().widgets.noninteractive.bg_fill)
+        .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+        .corner_radius(10)
+        .inner_margin(9.0);
     ui.add_space(6.0);
     frame
         .show(ui, |ui| {
             ui.set_width(ui.available_width().max(1.0));
             let mut send_key = false;
             ui.add_enabled_ui(can_edit, |ui| {
-                composer_scope(ui, chat, doc, session, t);
+                composer_scope(ui, chat, doc, session);
                 match chat.task {
                     Task::Ask => {
                         let label = ui.label(tl!("Question"));
@@ -863,19 +896,14 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessio
                         send_key = response.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
                     }
                     Task::Translate => {
-                        let label = ui.label(tl!("Target language"));
-                        craft_ui::ComboBox::from_id_salt("translation-language")
-                            .width(ui.available_width())
-                            .selected_text(chat.language.map_or_else(|| tl!("Choose a language"), |language| tl!(language)))
-                            .show_ui(ui, |ui| {
-                                for &language in TRANSLATION_LANGUAGES {
-                                    if ui.selectable_value(&mut chat.language, Some(language), tl!(language)).clicked() {
-                                        ui.close();
-                                    }
-                                }
-                            })
-                            .response
-                            .labelled_by(label.id);
+                        let languages: Vec<_> = TRANSLATION_LANGUAGES.iter().map(|&language| Entry::new(language, tl!(language))).collect();
+                        if let Some(&language) = Select::new(tl!("Target language"), Bind::given(chat.language.unwrap_or_default()), &languages)
+                            .placeholder(tl!("Choose a language"))
+                            .show(ui)
+                            .value()
+                        {
+                            chat.language = Some(language);
+                        }
                     }
                     Task::Summarize => {}
                 }
@@ -885,8 +913,11 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessio
                 let destination = profile.endpoint().ok();
                 let host = destination.as_ref().and_then(|url| url.host_str()).unwrap_or(&profile.base_url);
                 let details = format!("{}\n{}", profile.model, destination.as_ref().map_or(profile.base_url.as_str(), |url| url.as_str()));
-                ui.add(egui::Label::new(egui::RichText::new(format!("{} · {host}", profile.name)).small().color(t.text_muted)).truncate())
-                    .on_hover_text(details);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(format!("{} · {host}", profile.name)).small().color(ui.visuals().weak_text_color()))
+                        .truncate(),
+                )
+                .on_hover_text(details);
             }
             ui.horizontal_wrapped(|ui| {
                 if chat.destination.is_err() {
@@ -916,7 +947,9 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessio
                         Task::Translate => tl!("Send and translate"),
                     };
                     let button = if ready {
-                        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE)).fill(t.accent).corner_radius(8)
+                        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE))
+                            .fill(ui.visuals().selection.bg_fill)
+                            .corner_radius(8)
                     } else {
                         egui::Button::new(label)
                     };
@@ -935,13 +968,13 @@ fn composer(ui: &mut egui::Ui, chat: &mut Chat, doc: &Document, session: &Sessio
                 Ok(_) if chat.task == Task::Ask => tl!("Sends your question, matching excerpts, and recent turns for this scope."),
                 Ok(_) => tl!("Sends text from the selected pages."),
             };
-            ui.label(egui::RichText::new(disclosure).small().color(t.text_muted));
+            ui.label(egui::RichText::new(disclosure).small().color(ui.visuals().weak_text_color()));
             settings
         })
         .inner
 }
 
-fn conversation(ui: &mut egui::Ui, chat: &Chat, doc: &Document, nav: &mut Option<crate::panels::Nav>, t: &theme::Tokens) {
+fn conversation(ui: &mut egui::Ui, chat: &Chat, doc: &Document, nav: &mut Option<crate::panels::Nav>) {
     let turns = chat
         .archive
         .as_deref()
@@ -955,15 +988,15 @@ fn conversation(ui: &mut egui::Ui, chat: &Chat, doc: &Document, nav: &mut Option
                 Task::Translate => tl!("Choose a language to translate text from the selected pages."),
             };
             ui.add_space(16.0);
-            ui.label(egui::RichText::new(hint).color(t.text_muted));
+            ui.label(egui::RichText::new(hint).color(ui.visuals().weak_text_color()));
         }
         for (index, turn) in turns.iter().enumerate() {
             ui.add_space(10.0);
-            prompt_bubble(ui, &turn.question, t);
+            prompt_bubble(ui, &turn.question);
             ui.add_space(8.0);
             ui.label(&turn.answer);
             if let Some(notice) = &turn.notice {
-                ui.label(egui::RichText::new(notice).small().color(t.text_muted));
+                ui.label(egui::RichText::new(notice).small().color(ui.visuals().weak_text_color()));
             }
             if turn.task == Task::Translate && !turn.citations.is_empty() {
                 egui::CollapsingHeader::new(tl!("Source text")).id_salt(index).show(ui, |ui| {
@@ -975,7 +1008,7 @@ fn conversation(ui: &mut egui::Ui, chat: &Chat, doc: &Document, nav: &mut Option
             }
             ui.horizontal_wrapped(|ui| {
                 let copy_id = ui.make_persistent_id(("copy-answer", &chat.revision, &chat.archive, index, &turn.question));
-                copy_answer(ui, copy_id, &turn.answer, t);
+                copy_answer(ui, copy_id, &turn.answer);
                 for cite in &turn.citations {
                     let page = format!("{} {}", tl!("Page"), cite.page);
                     if let Some(location) = &cite.location {
@@ -997,7 +1030,7 @@ fn conversation(ui: &mut egui::Ui, chat: &Chat, doc: &Document, nav: &mut Option
             && let Some(prompt) = &chat.pending
         {
             ui.add_space(10.0);
-            prompt_bubble(ui, prompt, t);
+            prompt_bubble(ui, prompt);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -1011,9 +1044,8 @@ fn conversation(ui: &mut egui::Ui, chat: &Chat, doc: &Document, nav: &mut Option
     });
 }
 
-fn copy_answer(ui: &mut egui::Ui, id: egui::Id, answer: &str, t: &theme::Tokens) {
+fn copy_answer(ui: &mut egui::Ui, id: egui::Id, answer: &str) {
     const FEEDBACK_SECONDS: f64 = 1.5;
-    const ICON_SIZE: f32 = 14.0;
     let now = ui.input(|i| i.time);
     let deadline = ui.data(|data| data.get_temp::<f64>(id));
     let copied = deadline.is_some_and(|deadline| deadline > now);
@@ -1027,15 +1059,17 @@ fn copy_answer(ui: &mut egui::Ui, id: egui::Id, answer: &str, t: &theme::Tokens)
 
     let (copy_label, copied_label) = (tl!("Copy"), tl!("Copied"));
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let label_width = crate::widgets::text_width(ui, copy_label, &font).max(crate::widgets::text_width(ui, copied_label, &font));
-    let width = label_width + ICON_SIZE + ui.spacing().item_spacing.x + 2.0 * ui.spacing().button_padding.x;
-    let (icon, label, icon_color, fill) =
-        if copied { ("check", copied_label, t.accent_text, t.accent_soft) } else { ("copy", copy_label, t.icon, t.field) };
-    let button = egui::Button::image_and_text(crate::widgets::icons::image(icon, ICON_SIZE, icon_color), label)
+    let label_width = ui
+        .fonts_mut(|fonts| {
+            [copy_label, copied_label].map(|label| fonts.layout_no_wrap(label.to_string(), font.clone(), egui::Color32::PLACEHOLDER).size().x)
+        })
+        .into_iter()
+        .fold(0.0, f32::max);
+    let (label, fill) = if copied { (copied_label, ui.visuals().selection.bg_fill) } else { (copy_label, ui.visuals().widgets.inactive.bg_fill) };
+    let button = egui::Button::new(label)
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, t.border))
-        .corner_radius(6)
-        .min_size(egui::vec2(width.max(68.0), 26.0));
+        .stroke(ui.visuals().widgets.inactive.bg_stroke)
+        .min_size(egui::vec2(label_width + 2.0 * ui.spacing().button_padding.x, 0.0));
     if ui.add(button).on_hover_text(tl!("Copy answer")).clicked() {
         ui.ctx().copy_text(answer.to_owned());
         ui.data_mut(|data| data.insert_temp(id, now + FEEDBACK_SECONDS));
@@ -1043,14 +1077,19 @@ fn copy_answer(ui: &mut egui::Ui, id: egui::Id, answer: &str, t: &theme::Tokens)
     }
 }
 
-fn prompt_bubble(ui: &mut egui::Ui, prompt: &str, t: &theme::Tokens) -> egui::Response {
+fn prompt_bubble(ui: &mut egui::Ui, prompt: &str) -> egui::Response {
     const PADDING: f32 = 9.0;
     let max_text_width = (ui.available_width() * 0.86 - 2.0 * PADDING).max(1.0);
     let galley = egui::WidgetText::from(prompt).into_galley(ui, Some(egui::TextWrapMode::Wrap), max_text_width, egui::FontSelection::Default);
     let width = galley.size().x + 2.0 * PADDING;
     ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
         ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            egui::Frame::new().fill(t.accent_soft).corner_radius(10).inner_margin(PADDING).show(ui, |ui| ui.label(galley)).response
+            egui::Frame::new()
+                .fill(ui.visuals().widgets.inactive.weak_bg_fill)
+                .corner_radius(10)
+                .inner_margin(PADDING)
+                .show(ui, |ui| ui.label(galley))
+                .response
         })
         .inner
     })
@@ -1068,7 +1107,6 @@ mod tests {
         let ctx = egui::Context::default();
         let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 400.0))), ..Default::default() };
         ctx.run_ui(input, |ui| {
-            let t = theme::Tokens::for_kind(theme::ThemeKind::Light);
             let space = ui.available_rect_before_wrap();
             let prompts = [
                 "What should I prepare before the first review, and when does the project start?",
@@ -1076,7 +1114,7 @@ mod tests {
                 "Summarize pages 1–2",
                 "Translate pages 1–2 to Marathi",
             ];
-            let [wrapped, ask, summary, translation] = prompts.map(|prompt| prompt_bubble(ui, prompt, &t).rect);
+            let [wrapped, ask, summary, translation] = prompts.map(|prompt| prompt_bubble(ui, prompt).rect);
             for bubble in [wrapped, ask, summary, translation] {
                 assert!((bubble.right() - space.right()).abs() <= 1.0, "{bubble:?} was off the right edge of {space:?}");
                 assert!(bubble.width() <= space.width() * 0.86 + 1.0, "{bubble:?} exceeds the width limit");
@@ -1092,11 +1130,12 @@ mod tests {
     #[test]
     fn document_chat_opens_in_a_pane_and_its_citation_navigates() {
         let bytes = pdfcraft_engine::Session::new().create_from_text("Test", "One\u{c}Two").unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
-            let mut app = PdfCraftApp::new();
-            app.set_option("language", "en").unwrap();
-            app.open_bytes("test.pdf", None, bytes.as_ref().clone()).unwrap();
-            app.run_command("ai.ask");
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|cc| {
+            PdfCraftApp::install_runtime(&cc.egui_ctx);
+            let mut app = PdfCraftApp::for_unit_tests();
+            app.set_option(&cc.egui_ctx, "language", "en").unwrap();
+            app.open_bytes(&cc.egui_ctx, "test.pdf", None, bytes.as_ref().clone()).unwrap();
+            app.run_command(&cc.egui_ctx, "ai.ask");
             let (_, id) = app.active_ids().unwrap();
             let mut chat = Chat::new(app.session.get(id).unwrap(), 1);
             chat.turns.push(Turn {
@@ -1112,8 +1151,8 @@ mod tests {
             app
         });
         h.run_steps(4);
-        assert_eq!(h.state().right, Some(RightPanel::AiChat));
-        assert!(h.state().dialog.is_none());
+        assert_eq!(h.state().right(), Some(RightPanel::AiChat));
+        assert!(!h.state().modal_open());
         let citation = h.get_by_role_and_label(egui::accesskit::Role::Link, "Page 2");
         let composer = h.get_by_role_and_label(egui::accesskit::Role::MultilineTextInput, "Question");
         assert!(composer.rect().min.y > citation.rect().max.y && composer.rect().min.y > 650.0);
@@ -1133,14 +1172,15 @@ mod tests {
         h.get_by_role_and_label(egui::accesskit::Role::Button, "Copy");
         h.get_by_role_and_label(egui::accesskit::Role::Link, "Page 2").click();
         h.run_steps(4);
-        assert_eq!(h.state().views[0].current, 1);
+        assert_eq!(h.state().views[0].current(), 1);
         for (command, task) in [("ai.summary", Task::Summarize), ("ai.translate", Task::Translate)] {
-            h.state_mut().run_command(command);
+            let ctx = h.ctx.clone();
+            h.state_mut().run_command(&ctx, command);
             h.run_steps(4);
             let (_, id) = h.state().active_ids().unwrap();
             assert!(h.state().ai_chats.get(&id).unwrap().task == task);
-            assert_eq!(h.state().right, Some(RightPanel::AiChat));
-            assert!(h.state().dialog.is_none());
+            assert_eq!(h.state().right(), Some(RightPanel::AiChat));
+            assert!(!h.state().modal_open());
             assert!(h.query_by_label("Page 2").is_some());
         }
         let language = h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Target language");
@@ -1150,13 +1190,14 @@ mod tests {
         for option in ["Hindi", "Marathi", "Spanish"] {
             assert!(h.query_by_label(option).is_some());
         }
-        h.get_by_role_and_label(egui::accesskit::Role::Button, "Marathi").scroll_to_me();
+        h.get_by_label("Marathi").scroll_to_me();
         h.run_steps(4);
-        h.get_by_role_and_label(egui::accesskit::Role::Button, "Marathi").click();
+        h.get_by_label("Marathi").click();
         h.run_steps(4);
         let (_, id) = h.state().active_ids().unwrap();
         assert_eq!(h.state().ai_chats.get(&id).unwrap().language, Some("Marathi"));
-        h.state_mut().apply_edit(pdfcraft_engine::Edit::DeletePages { pages: vec![0] });
+        let ctx = h.ctx.clone();
+        h.state_mut().apply_edit(&ctx, pdfcraft_engine::Edit::DeletePages { pages: vec![0] });
         h.run_steps(4);
         assert!(h.query_by_label("Page 2").is_none());
     }
@@ -1164,10 +1205,11 @@ mod tests {
     #[test]
     fn ai_ocr_controls_follow_the_selected_area_and_action() {
         let bytes = Session::new().create_blank(300.0, 400.0, 2).unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
-            let mut app = PdfCraftApp::new();
-            app.set_option("language", "en").unwrap();
-            app.open_bytes("figure.pdf", None, bytes.as_ref().clone()).unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|cc| {
+            PdfCraftApp::install_runtime(&cc.egui_ctx);
+            let mut app = PdfCraftApp::for_unit_tests();
+            app.set_option(&cc.egui_ctx, "language", "en").unwrap();
+            app.open_bytes(&cc.egui_ctx, "figure.pdf", None, bytes.as_ref().clone()).unwrap();
             let (view, id) = app.active_ids().unwrap();
             open_region(&mut app, view, 2, [10.0, 20.0, 90.0, 120.0], Task::Ask);
             app.ai_chats.get_mut(&id).unwrap().destination = Ok(ai::Profile::llama_cpp("Local".into(), ai::LLAMA_CPP_URL.into(), "vision".into()));
@@ -1211,14 +1253,15 @@ mod tests {
     #[test]
     fn escape_clears_the_snapshot_and_chat_scope_without_erasing_the_draft() {
         let bytes = Session::new().create_blank(300.0, 400.0, 2).unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
-            let mut app = PdfCraftApp::new();
-            app.set_option("language", "en").unwrap();
-            app.open_bytes("figure.pdf", None, bytes.as_ref().clone()).unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|cc| {
+            PdfCraftApp::install_runtime(&cc.egui_ctx);
+            let mut app = PdfCraftApp::for_unit_tests();
+            app.set_option(&cc.egui_ctx, "language", "en").unwrap();
+            app.open_bytes(&cc.egui_ctx, "figure.pdf", None, bytes.as_ref().clone()).unwrap();
             let (view, id) = app.active_ids().unwrap();
             let rect = [10.0, 20.0, 90.0, 120.0];
             app.quick_tool = crate::QuickTool::Snapshot;
-            app.views[view].area_pick = Some((1, rect));
+            app.views[view].session.area_pick = Some((1, rect));
             open_region(&mut app, view, 2, rect, Task::Ask);
             app.ai_chats.get_mut(&id).unwrap().question = "What is shown here?".into();
             app
@@ -1232,7 +1275,7 @@ mod tests {
         h.run_steps(4);
         let (view, id) = h.state().active_ids().unwrap();
         let chat = &h.state().ai_chats[&id];
-        assert!(h.state().views[view].area_pick.is_none());
+        assert!(h.state().views[view].session.area_pick.is_none());
         assert!(chat.selection.is_none());
         assert_eq!(chat.question, "What is shown here?");
     }
@@ -1241,11 +1284,12 @@ mod tests {
     fn stopping_a_chat_request_discards_its_late_answer() {
         let (reply, job) = std::sync::mpsc::channel();
         let bytes = pdfcraft_engine::Session::new().create_from_text("Test", "One").unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
-            let mut app = PdfCraftApp::new();
-            app.set_option("language", "en").unwrap();
-            app.open_bytes("test.pdf", None, bytes.as_ref().clone()).unwrap();
-            app.run_command("ai.ask");
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|cc| {
+            PdfCraftApp::install_runtime(&cc.egui_ctx);
+            let mut app = PdfCraftApp::for_unit_tests();
+            app.set_option(&cc.egui_ctx, "language", "en").unwrap();
+            app.open_bytes(&cc.egui_ctx, "test.pdf", None, bytes.as_ref().clone()).unwrap();
+            app.run_command(&cc.egui_ctx, "ai.ask");
             let (_, id) = app.active_ids().unwrap();
             let chat = app.ai_chats.get_mut(&id).unwrap();
             chat.destination = Ok(ai::Profile::llama_cpp("Local".into(), ai::LLAMA_CPP_URL.into(), "local-model".into()));
@@ -1284,16 +1328,17 @@ mod tests {
     fn ask_picks_open_pdfs_and_highlights_the_cited_same_named_tab() {
         use egui::accesskit::Role;
 
-        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|_| {
-            let mut app = PdfCraftApp::new();
-            app.set_option("language", "en").unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_eframe(|cc| {
+            PdfCraftApp::install_runtime(&cc.egui_ctx);
+            let mut app = PdfCraftApp::for_unit_tests();
+            app.set_option(&cc.egui_ctx, "language", "en").unwrap();
             for (name, text) in [("paper.pdf", "Sample size was 30."), ("paper.pdf", "Sample size was 60."), ("excluded.pdf", "Sample size was 99.")]
             {
                 let bytes = app.session.create_from_text("Test", text).unwrap();
-                app.open_bytes(name, None, bytes.as_ref().clone()).unwrap();
+                app.open_bytes(&cc.egui_ctx, name, None, bytes.as_ref().clone()).unwrap();
             }
             app.active = Some(0);
-            app.run_command("ai.ask");
+            app.run_command(&cc.egui_ctx, "ai.ask");
             app
         });
         h.run_steps(5);
@@ -1342,8 +1387,8 @@ mod tests {
         h.run_steps(4);
         assert_eq!(h.state().active, Some(1));
         assert_eq!(h.state().ai_chat_anchor, Some(owner));
-        assert_eq!(h.state().views[1].citation_flash.as_ref().unwrap().1, [expected]);
-        assert!(h.state().views[0].citation_flash.is_none() && h.state().views[2].citation_flash.is_none());
+        assert_eq!(h.state().views[1].session.citation_flash.as_ref().unwrap().1, [expected]);
+        assert!(h.state().views[0].session.citation_flash.is_none() && h.state().views[2].session.citation_flash.is_none());
         h.get_by_role_and_label(Role::Link, &link);
     }
 }

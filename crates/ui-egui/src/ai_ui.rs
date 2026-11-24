@@ -2,6 +2,9 @@
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+use craft::ui::choice::Checkbox;
+use craft::ui::contract::{Bind, Entry, Props as _, Show as _};
+use craft::ui::pickers::Select;
 use egui::{Context, Ui};
 use pdfcraft_platform::ai::{self, ApiFormat, Profile, Providers};
 use zeroize::Zeroizing;
@@ -81,12 +84,6 @@ impl Editor {
 }
 
 impl Settings {
-    pub(crate) fn reset(&mut self) {
-        if self.providers.is_some() || self.editor.is_some() || self.status.is_some() {
-            *self = Self::default();
-        }
-    }
-
     pub(crate) fn draw(&mut self, ui: &mut Ui) {
         if self.providers.is_none() && self.status.is_none() {
             match ai::load() {
@@ -122,19 +119,16 @@ impl Settings {
             ui.label(format!("{} {active}", tl!("Active provider:")));
             ui.add_enabled_ui(!busy, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    let label = ui.label(tl!("Provider profile"));
-                    craft_ui::ComboBox::from_id_salt("ai-provider-profile")
-                        .selected_text(self.selected.as_deref().unwrap_or(tl!("Choose a profile")))
-                        .show_ui(ui, |ui| {
-                            for profile in &providers.profiles {
-                                if ui.selectable_value(&mut self.selected, Some(profile.name.clone()), &profile.name).changed() {
-                                    self.editor = None;
-                                    self.status = None;
-                                }
-                            }
-                        })
-                        .response
-                        .labelled_by(label.id);
+                    let profiles: Vec<_> = providers.profiles.iter().map(|profile| Entry::new(profile.name.clone(), profile.name.clone())).collect();
+                    if let Some(name) = Select::new(tl!("Provider profile"), Bind::given(self.selected.clone().unwrap_or_default()), &profiles)
+                        .placeholder(tl!("Choose a profile"))
+                        .show(ui)
+                        .value()
+                    {
+                        self.selected = Some(name.clone());
+                        self.editor = None;
+                        self.status = None;
+                    }
                     if ui.button(tl!("Add OpenAI")).clicked() {
                         self.editor =
                             Some(Editor::new(Profile::new("OpenAI".into(), ai::OPENAI_URL.into(), String::new(), ApiFormat::default()), false));
@@ -225,20 +219,9 @@ impl Settings {
             }
             ui.end_row();
             if !editor.llama_cpp {
-                let label = ui.label(tl!("API format"));
-                let chat = tl!("Chat Completions");
-                let responses = tl!("Responses");
-                craft_ui::ComboBox::from_id_salt("ai-api-format")
-                    .selected_text(match editor.api_format {
-                        ApiFormat::ChatCompletions => chat,
-                        ApiFormat::Responses => responses,
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut editor.api_format, ApiFormat::ChatCompletions, chat);
-                        ui.selectable_value(&mut editor.api_format, ApiFormat::Responses, responses);
-                    })
-                    .response
-                    .labelled_by(label.id);
+                ui.label(tl!("API format"));
+                let formats = [Entry::new(ApiFormat::ChatCompletions, tl!("Chat Completions")), Entry::new(ApiFormat::Responses, tl!("Responses"))];
+                Select::new(tl!("API format"), Bind::bound(&mut editor.api_format), &formats).show(ui);
                 ui.end_row();
             }
             let label = ui.label(tl!("Model ID"));
@@ -260,7 +243,7 @@ impl Settings {
         });
         if saved_key {
             ui.label(tl!("Changing the base URL requires entering the key again."));
-            if ui.add(crate::widgets::checkbox(&mut editor.clear_key, tl!("Remove saved key"))).changed() {
+            if Checkbox::new(Bind::bound(&mut editor.clear_key)).label(tl!("Remove saved key")).show(ui).value().is_some() {
                 editor.models.clear();
                 self.status = None;
             }
@@ -279,11 +262,8 @@ impl Settings {
                     }
                 }
                 if !editor.models.is_empty() {
-                    craft_ui::ComboBox::from_id_salt("ai-llama-models").selected_text(tl!("Choose a model")).show_ui(ui, |ui| {
-                        for model in &editor.models {
-                            ui.selectable_value(&mut editor.model, model.clone(), model);
-                        }
-                    });
+                    let models: Vec<_> = editor.models.iter().map(|model| Entry::new(model.clone(), model.clone())).collect();
+                    Select::new(tl!("Choose a model"), Bind::bound(&mut editor.model), &models).placeholder(tl!("Choose a model")).show(ui);
                 }
             });
         }

@@ -257,7 +257,9 @@ fn save_at(path: &Path, enabled: bool, update: Option<(&str, &[Turn])>) -> Resul
     if bytes.len() as u64 > MAX_HISTORY_BYTES {
         return Err("Saved chat history is full. Delete old conversations to save more.".into());
     }
-    crate::staging::write_atomically(path, &bytes, crate::staging::StagingName::TagThenSuffix)
+    craft::atomic::WriteOptions::default()
+        .with_new_file_permissions(craft::atomic::NewFilePermissions::Private)
+        .atomic_write(path, &bytes)
         .map_err(|e| format!("Could not save chat history: {e}"))?;
     Ok(history)
 }
