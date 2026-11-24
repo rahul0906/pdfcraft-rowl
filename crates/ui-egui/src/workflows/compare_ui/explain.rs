@@ -7,7 +7,6 @@ use pdfcraft_engine::{DocId, Session, ai_ask, ai_compare};
 use pdfcraft_platform::ai::{self, Profile};
 
 use crate::ai_ui::{Job, poll, start};
-use crate::theme::Tokens;
 
 use super::PanelAction;
 
@@ -58,7 +57,7 @@ impl Explanation {
         }
     }
 
-    pub(super) fn draw(&mut self, ui: &mut egui::Ui, t: &Tokens, session: &Session, pages: &[usize]) -> Option<PanelAction> {
+    pub(super) fn draw(&mut self, ui: &mut egui::Ui, session: &Session, pages: &[usize]) -> Option<PanelAction> {
         if !self.open {
             let available = self.matches(session);
             let button = ui.add_enabled(available, egui::Button::new(tl!("Explain what changed")));
@@ -87,7 +86,7 @@ impl Explanation {
             return None;
         }
         if let Some(outcome) = &self.outcome {
-            return show_outcome(ui, t, outcome);
+            return show_outcome(ui, outcome);
         }
 
         let [older, newer] = self.revisions.as_ref()?;
@@ -167,10 +166,10 @@ fn active_profile() -> Result<Profile, String> {
     ai::load().and_then(|profiles| profiles.enabled_profile(None).cloned())
 }
 
-fn show_outcome(ui: &mut egui::Ui, t: &Tokens, outcome: &Outcome) -> Option<PanelAction> {
+fn show_outcome(ui: &mut egui::Ui, outcome: &Outcome) -> Option<PanelAction> {
     ui.label(egui::RichText::new(tl!("Explanation")).strong());
     if let Some(notice) = &outcome.notice {
-        ui.label(egui::RichText::new(notice).small().color(t.text_muted));
+        ui.label(egui::RichText::new(notice).small().color(ui.visuals().weak_text_color()));
     }
     if outcome.changes.is_empty() {
         ui.label(tl!("No differences in the text."));
@@ -184,9 +183,9 @@ fn show_outcome(ui: &mut egui::Ui, t: &Tokens, outcome: &Outcome) -> Option<Pane
             let version = if old { tl!("Older") } else { tl!("Newer") };
             let mut phrase = egui::text::LayoutJob::default();
             let font = egui::TextStyle::Body.resolve(ui.style());
-            let muted = egui::TextFormat::simple(font.clone(), t.text_muted);
+            let muted = egui::TextFormat::simple(font.clone(), ui.visuals().weak_text_color());
             phrase.append(&format!("{version} · {} ", side.before), 0.0, muted.clone());
-            phrase.append(&side.text, 0.0, egui::TextFormat::simple(font, t.accent_text));
+            phrase.append(&side.text, 0.0, egui::TextFormat::simple(font, ui.visuals().hyperlink_color));
             if !side.after.is_empty() {
                 phrase.append(&format!(" {}", side.after), 0.0, muted);
             }
@@ -218,14 +217,15 @@ mod tests {
         let session = Session::new();
         let old = session.create_from_text("Old", "Unchanged page\u{c}The sample size was 100.").unwrap();
         let new = session.create_from_text("New", "Unchanged page\u{c}The sample size was 120.").unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 1000.0)).build_eframe(|_| {
-            let mut app = PdfCraftApp::new();
-            app.set_option("language", "en").unwrap();
-            app.open_bytes("old.pdf", None, old.as_ref().clone()).unwrap();
-            app.open_bytes("new.pdf", None, new.as_ref().clone()).unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 1000.0)).build_eframe(|cc| {
+            PdfCraftApp::install_runtime(&cc.egui_ctx);
+            let mut app = PdfCraftApp::for_unit_tests();
+            app.set_option(&cc.egui_ctx, "language", "en").unwrap();
+            app.open_bytes(&cc.egui_ctx, "old.pdf", None, old.as_ref().clone()).unwrap();
+            app.open_bytes(&cc.egui_ctx, "new.pdf", None, new.as_ref().clone()).unwrap();
             app.compare_old = Some(app.views[0].id);
             app.active = Some(1);
-            app.run_compare();
+            app.run_compare(&cc.egui_ctx);
             app
         });
         h.ctx.options_mut(|options| options.warn_on_id_clash = true);
@@ -243,8 +243,8 @@ mod tests {
         h.run_steps(4);
         let app = h.state();
         assert!(app.compare.as_ref().unwrap().side_by_side);
-        assert_eq!(app.views[0].current, 1);
-        assert!(app.views[0].citation_flash.as_ref().is_some_and(|(page, rects, _)| *page == 1 && !rects.is_empty()));
+        assert_eq!(app.views[0].current(), 1);
+        assert!(app.views[0].session.citation_flash.as_ref().is_some_and(|(page, rects, _)| *page == 1 && !rects.is_empty()));
         assert!(
             !h.output().shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text)
             if text.galley.text().contains("use of widget ID"))),
@@ -252,8 +252,8 @@ mod tests {
         );
         h.get_by_role_and_label(egui::accesskit::Role::Link, "Newer page 2").click();
         h.run_steps(4);
-        assert_eq!(h.state().views[1].current, 1);
-        assert!(h.state().views[1].citation_flash.as_ref().is_some_and(|(page, rects, _)| *page == 1 && !rects.is_empty()));
+        assert_eq!(h.state().views[1].current(), 1);
+        assert!(h.state().views[1].session.citation_flash.as_ref().is_some_and(|(page, rects, _)| *page == 1 && !rects.is_empty()));
 
         h.state_mut().close_tab(0);
         h.run_steps(4);

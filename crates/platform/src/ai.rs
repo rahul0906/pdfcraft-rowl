@@ -233,7 +233,9 @@ fn edit_store() -> Result<(File, PathBuf, Providers), String> {
 
 fn write_store(path: &std::path::Path, store: &Providers) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(store).map_err(|_| "Could not encode AI provider settings.")?;
-    crate::staging::write_atomically(path, &bytes, crate::staging::StagingName::TagThenSuffix)
+    craft::atomic::WriteOptions::default()
+        .with_new_file_permissions(craft::atomic::NewFilePermissions::Private)
+        .atomic_write(path, &bytes)
         .map_err(|e| format!("Could not save AI provider settings: {e}"))
 }
 
